@@ -20,6 +20,9 @@ tiff = "0.11.3"
 zune-jpeg = "0.5.15"
 zxing-cpp = { version = "0.5.3", features = ["bundled"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+
 [dev-dependencies]
 # Tests write JPEG inputs; the feature stays out of the shipped binary.
 image = { version = "0.25.10", default-features = false, features = ["jpeg"] }

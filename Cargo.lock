@@ -115,6 +115,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tiff",
+ "windows-sys",
  "zune-jpeg",
  "zxing-cpp",
 ]

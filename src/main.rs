@@ -13,6 +13,7 @@ use barcode_read::error::Error;
 use barcode_read::input::{self, PageList};
 use barcode_read::{Options, decode};
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser};
+use text::{Look, Out};
 use zxingcpp::{BarcodeFormat, BarcodeFormats};
 
 const HELP: &str = "\
@@ -133,10 +134,13 @@ fn main() -> ExitCode {
     if cli.paths.is_empty() {
         return usage(&Error::no_input(), cli.json);
     }
-    match read(&cli, &options) {
+    let mut out = Out::new(io::stdout().lock(), Look::stdout());
+    let mut err = Out::new(io::stderr(), Look::stderr());
+    match read(&cli, &options, &mut out, &mut err) {
         Ok(code) => ExitCode::from(code),
         Err(e) => {
-            let _ = text::error(&mut io::stderr(), None, &Error::io(e));
+            let e = Error::io(e);
+            let _ = text::error(&mut err, &e.message, e.hint);
             ExitCode::from(3)
         }
     }
@@ -144,28 +148,32 @@ fn main() -> ExitCode {
 
 /// Reads every input in order, printing text per file as it finishes or one JSON object at
 /// the end, and gives the exit code.
-fn read(cli: &Cli, options: &Options) -> io::Result<u8> {
-    let (mut out, mut err) = (io::stdout().lock(), io::stderr());
+fn read(
+    cli: &Cli,
+    options: &Options,
+    out: &mut Out<impl Write>,
+    err: &mut Out<impl Write>,
+) -> io::Result<u8> {
     let mut files = vec![];
     for input in input::expand(&cli.paths, cli.recursive) {
         let start = Instant::now();
         let file = engine::read_input(&input, options);
         if cli.debug {
-            text::debug(&mut err, &file, start.elapsed())?;
+            text::debug(err, &file, start.elapsed())?;
         }
         if !cli.json {
-            text::file(&mut out, &mut err, &file)?;
+            text::file(out, err, &file)?;
         }
         files.push(file);
     }
     let report = Report::new(&files);
     if cli.json {
-        serde_json::to_writer(&mut out, &report)?;
-        writeln!(out)?;
+        serde_json::to_writer(&mut out.w, &report)?;
+        writeln!(out.w)?;
     } else if files.len() > 1 {
-        text::summary(&mut out, &report)?;
+        text::summary(out, &report)?;
     }
-    out.flush()?;
+    out.w.flush()?;
     Ok(report.exit_code())
 }
 
@@ -175,7 +183,11 @@ fn usage(e: &Error, json: bool) -> ExitCode {
         let failure = serde_json::to_string(&Failure { error: e }).expect("plain strings");
         writeln!(io::stdout(), "{failure}")
     } else {
-        text::error(&mut io::stderr(), None, e)
+        text::error(
+            &mut Out::new(io::stderr(), Look::stderr()),
+            &e.message,
+            e.hint,
+        )
     };
     ExitCode::from(2)
 }
