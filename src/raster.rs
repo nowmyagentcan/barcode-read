@@ -138,6 +138,16 @@ fn decode_jpeg(bytes: &[u8], options: DecoderOptions) -> Result<Page, Error> {
     })
 }
 
+/// Rec. 601 luma of 8-bit samples, as zxing-cpp computes it.
+pub(crate) fn rec601(r: u32, g: u32, b: u32) -> u32 {
+    (306 * r + 601 * g + 117 * b + 512) >> 10
+}
+
+/// Grey `l` with coverage `a` composited over white.
+pub(crate) fn over_white(l: u32, a: u32) -> u8 {
+    (l * a / 255 + 255 - a) as u8
+}
+
 /// Rec. 601 luma as zxing-cpp computes it, with any alpha composited over white.
 pub fn luma<P, C>(img: &ImageBuffer<P, C>) -> GrayImage
 where
@@ -146,8 +156,7 @@ where
 {
     let pixels = img.pixels().map(|p| {
         let [r, g, b, a] = p.to_rgba().0.map(u32::from);
-        let l = (306 * r + 601 * g + 117 * b + 512) >> 10;
-        (l * a / 255 + 255 - a) as u8
+        over_white(rec601(r, g, b), a)
     });
     GrayImage::from_vec(img.width(), img.height(), pixels.collect()).expect("one byte per pixel")
 }

@@ -2,16 +2,16 @@
 
 use std::io::Cursor;
 
-use ::tiff::decoder::{Decoder, DecodingResult, Limits};
+use ::tiff::decoder::{BufferLayoutPreference, Decoder, DecodingResult, Limits};
 use ::tiff::tags::{CompressionMethod, Tag};
 use ::tiff::{ColorType, TiffError, TiffUnsupportedError};
-use image::{DynamicImage, GrayImage, ImageBuffer, RgbImage, metadata::Orientation};
+use image::{GrayImage, metadata::Orientation};
 
 use crate::Options;
 use crate::decode::Page;
 use crate::error::{Error, Warning};
 use crate::input::select;
-use crate::raster::{check_size, to_grey};
+use crate::raster::{check_size, over_white, rec601};
 
 type Tiff<'a> = Decoder<Cursor<&'a [u8]>>;
 
@@ -25,12 +25,9 @@ pub fn pages(
     warnings: &mut Vec<Warning>,
     mut each: impl FnMut(Page),
 ) -> Result<(), Error> {
-    // Room for the largest image allowed (120 megapixels of 16-bit RGBA).
-    let mut limits = Limits::default();
-    limits.decoding_buffer_size = 1 << 30;
     let mut tiff = Decoder::new(Cursor::new(bytes))
         .map_err(|e| Error::corrupt_image("TIFF", e))?
-        .with_limits(limits);
+        .with_limits(limits());
     let mut count = 1;
     while tiff.more_images() {
         if let Err(e) = tiff.next_image() {
@@ -68,77 +65,186 @@ fn page(tiff: &mut Tiff, number: usize) -> Result<Page, Error> {
     check_size(w.into(), h.into())?;
     let orientation = tiff.find_tag_unsigned(Tag::Orientation).ok().flatten();
     let color = tiff.colortype().map_err(unreadable)?;
-    let pixels = tiff.read_image().map_err(unreadable)?;
+    let layout = tiff.image_buffer_layout().map_err(unreadable)?;
+    let planar = layout.planes > 1 && color.bit_depth() % 8 == 0;
+    let pixels = match planar {
+        true => planes(tiff, &layout, color.bit_depth() / 8, w, h)?,
+        false => tiff.read_image().map_err(unreadable)?,
+    };
+    let colours = match color {
+        ColorType::Gray(_) | ColorType::Multiband { .. } => 1,
+        ColorType::RGB(_) | ColorType::RGBA(_) => 3,
+        ColorType::CMYK(_) | ColorType::CMYKA(_) => 4,
+        _ => 0,
+    };
     let img = match (color, pixels) {
-        (ColorType::Gray(8), DecodingResult::U8(v)) => {
-            GrayImage::from_raw(w, h, v).map(DynamicImage::ImageLuma8)
-        }
-        (ColorType::Gray(16), DecodingResult::U16(v)) => {
-            ImageBuffer::from_raw(w, h, v).map(DynamicImage::ImageLuma16)
-        }
-        (ColorType::GrayA(8), DecodingResult::U8(v)) => {
-            ImageBuffer::from_raw(w, h, v).map(DynamicImage::ImageLumaA8)
-        }
-        (ColorType::GrayA(16), DecodingResult::U16(v)) => {
-            ImageBuffer::from_raw(w, h, v).map(DynamicImage::ImageLumaA16)
-        }
-        (ColorType::RGB(8), DecodingResult::U8(v)) => {
-            ImageBuffer::from_raw(w, h, v).map(DynamicImage::ImageRgb8)
-        }
-        (ColorType::RGB(16), DecodingResult::U16(v)) => {
-            ImageBuffer::from_raw(w, h, v).map(DynamicImage::ImageRgb16)
-        }
-        (ColorType::RGBA(8), DecodingResult::U8(v)) => {
-            ImageBuffer::from_raw(w, h, v).map(DynamicImage::ImageRgba8)
-        }
-        (ColorType::RGBA(16), DecodingResult::U16(v)) => {
-            ImageBuffer::from_raw(w, h, v).map(DynamicImage::ImageRgba16)
-        }
         // JPEG-compressed pages come back as full-size YCbCr, whose Y is the grey we want.
         (ColorType::YCbCr(8), DecodingResult::U8(v)) if v.len() == w as usize * h as usize * 3 => {
             GrayImage::from_raw(w, h, v.into_iter().step_by(3).collect())
-                .map(DynamicImage::ImageLuma8)
-        }
-        (ColorType::CMYK(8), DecodingResult::U8(v)) => {
-            let rgb = v.as_chunks::<4>().0.iter().flat_map(|&[c, m, y, k]| {
-                let k = 255 - u32::from(k);
-                [c, m, y].map(|v| ((255 - u32::from(v)) * k / 255) as u8)
-            });
-            RgbImage::from_raw(w, h, rgb.collect()).map(DynamicImage::ImageRgb8)
         }
         // Bilevel and other packed grey: the tiff crate has already turned WhiteIsZero around.
         (ColorType::Gray(bits @ (1 | 2 | 4)), DecodingResult::U8(v)) => {
             // 255 is a multiple of 1, 3 and 15, so each level maps exactly and never overflows.
             let step = 255 / ((1 << bits) - 1);
             let samples = unpack(&v, bits, w, h).map(|s| s.into_iter().map(|s| s * step).collect());
-            samples
-                .and_then(|s| GrayImage::from_raw(w, h, s))
-                .map(DynamicImage::ImageLuma8)
+            samples.and_then(|s| GrayImage::from_raw(w, h, s))
         }
         (ColorType::Palette(bits @ (1 | 2 | 4 | 8)), DecodingResult::U8(v)) => {
             let map = tiff.get_tag_u16_vec(Tag::ColorMap).map_err(unreadable)?;
             let size = 1 << bits;
             let colour = |i: u8, c: usize| {
                 map.get(c * size + usize::from(i))
-                    .map_or(0, |v| (v >> 8) as u8)
+                    .map_or(0, |v| u32::from(v >> 8))
             };
-            let rgb = unpack(&v, bits, w, h).map(|s| {
+            let grey = unpack(&v, bits, w, h).map(|s| {
                 s.into_iter()
-                    .flat_map(|i| [0, 1, 2].map(|c| colour(i, c)))
+                    .map(|i| rec601(colour(i, 0), colour(i, 1), colour(i, 2)) as u8)
                     .collect()
             });
-            rgb.and_then(|rgb| RgbImage::from_raw(w, h, rgb))
-                .map(DynamicImage::ImageRgb8)
+            grey.and_then(|grey| GrayImage::from_raw(w, h, grey))
         }
-        (color, _) => return Err(bad(format!("{color:?} pixels aren't supported"))),
+        (_, DecodingResult::U8(v)) if colours > 0 && color.bit_depth() == 8 => {
+            samples(tiff, color, colours, &v, planar, w, h)
+        }
+        (_, DecodingResult::U16(v)) if colours > 0 && color.bit_depth() == 16 => {
+            // Scaled to 8 bits as `image` does.
+            let v: Vec<u8> = v
+                .iter()
+                .map(|&s| ((u32::from(s) + 128) / 257) as u8)
+                .collect();
+            samples(tiff, color, colours, &v, planar, w, h)
+        }
+        (color, pixels) => return Err(unsupported(color, &pixels)),
     };
-    let grey = to_grey(img.ok_or_else(|| bad("its pixel data is cut short".into()))?);
+    let grey = img.ok_or_else(|| bad("its pixel data is cut short".into()))?;
     Ok(Page {
         orientation: orientation
             .and_then(Orientation::from_exif)
             .unwrap_or(Orientation::NoTransforms),
         ..Page::new(number, grey)
     })
+}
+
+/// Room for the largest image allowed (120 megapixels of 16-bit RGBA).
+fn limits() -> Limits {
+    let mut limits = Limits::default();
+    limits.decoding_buffer_size = 1 << 30;
+    limits
+}
+
+/// Every plane of a planar page of `bytes`-byte samples, one after another. It's read chunk by
+/// chunk because tiff 0.11.3 takes the bottom tiles of every plane after the first as whole
+/// tiles and overruns its buffer (image-rs/image-tiff#403); rows past the image are dropped.
+fn planes(
+    tiff: &mut Tiff,
+    layout: &BufferLayoutPreference,
+    bytes: u8,
+    w: u32,
+    h: u32,
+) -> Result<DecodingResult, Error> {
+    let mut pixels = DecodingResult::U8(vec![]);
+    pixels.resize_to(layout, &limits()).map_err(unreadable)?;
+    let mut out = pixels.as_buffer(0);
+    let out = out.as_bytes_mut();
+    let (tw, th) = tiff.chunk_dimensions();
+    let across = w.div_ceil(tw);
+    let per_plane = across * h.div_ceil(th);
+    let (row, sample) = (w as usize * usize::from(bytes), usize::from(bytes));
+    for chunk in 0..per_plane * layout.planes as u32 {
+        let (plane, i) = (chunk / per_plane, chunk % per_plane);
+        let (x, y) = (i % across * tw, i / across * th);
+        let width = (w - x).min(tw) as usize * sample;
+        let mut tile = tiff.read_chunk(chunk).map_err(unreadable)?;
+        let tile = tile.as_buffer(0);
+        let rows = tile.as_bytes().chunks_exact(width);
+        for (r, src) in rows.take((h - y).min(th) as usize).enumerate() {
+            let at = (plane * h + y) as usize * row + r * row + x as usize * sample;
+            let dst = out.get_mut(at..at + width);
+            dst.ok_or_else(|| bad("its pixel data is cut short".into()))?
+                .copy_from_slice(src);
+        }
+    }
+    Ok(pixels)
+}
+
+/// Grey from 8-bit samples of 1 (grey), 3 (RGB) or 4 (CMYK) `colours`, interleaved or one plane
+/// per sample, with an alpha sample composited over white; `None` when the data is cut short.
+fn samples(
+    tiff: &mut Tiff,
+    color: ColorType,
+    colours: usize,
+    v: &[u8],
+    planar: bool,
+    w: u32,
+    h: u32,
+) -> Option<GrayImage> {
+    // tiff keeps only the colour samples and, for RGBA and CMYKA, the first extra one.
+    let stride = usize::from(color.num_samples());
+    let extra = tiff.find_tag_unsigned_vec::<u16>(Tag::ExtraSamples);
+    // ExtraSamples: 1 is premultiplied alpha, 2 plain alpha, 0 other data. Like tiff, an extra
+    // sample without the tag is taken as plain alpha.
+    let alpha = match (color, extra.ok().flatten().unwrap_or_default().first()) {
+        (ColorType::Gray(_) | ColorType::RGB(_) | ColorType::CMYK(_), _) => None,
+        (_, Some(1)) => Some(true),
+        (_, Some(2) | None) => Some(false),
+        _ => None,
+    };
+    let n = w as usize * h as usize;
+    if stride < colours + usize::from(alpha.is_some()) || v.len() < n * stride {
+        return None;
+    }
+    let sample = |i: usize, s: usize| {
+        u32::from(if planar {
+            v[s * n + i]
+        } else {
+            v[i * stride + s]
+        })
+    };
+    let grey = (0..n).map(|i| {
+        let s = |k| sample(i, k);
+        let l = match colours {
+            1 => s(0),
+            3 => rec601(s(0), s(1), s(2)),
+            _ => {
+                let k = 255 - s(3);
+                let [r, g, b] = [0, 1, 2].map(|c| (255 - s(c)) * k / 255);
+                rec601(r, g, b)
+            }
+        };
+        match alpha {
+            None => l as u8,
+            // Premultiplied grey is already scaled by its coverage.
+            Some(true) => (l + 255 - s(colours)).min(255) as u8,
+            Some(false) => over_white(l, s(colours)),
+        }
+    });
+    GrayImage::from_vec(w, h, grey.collect())
+}
+
+fn unsupported(color: ColorType, pixels: &DecodingResult) -> Error {
+    let name = match color {
+        ColorType::Gray(_) | ColorType::GrayA(_) | ColorType::Multiband { .. } => "grey",
+        ColorType::RGB(_) | ColorType::RGBA(_) => "RGB",
+        ColorType::CMYK(_) | ColorType::CMYKA(_) => "CMYK",
+        ColorType::Palette(_) => "palette",
+        ColorType::YCbCr(_) => "YCbCr",
+        ColorType::Lab(_) => "Lab",
+        _ => "colour",
+    };
+    let kind = match pixels {
+        DecodingResult::I8(_)
+        | DecodingResult::I16(_)
+        | DecodingResult::I32(_)
+        | DecodingResult::I64(_) => "signed ",
+        DecodingResult::F16(_) | DecodingResult::F32(_) | DecodingResult::F64(_) => {
+            "floating-point "
+        }
+        _ => "",
+    };
+    let bits = color.bit_depth();
+    bad(format!(
+        "its {bits}-bit {kind}{name} samples aren't supported"
+    ))
 }
 
 /// Samples of `bits` bits each, packed from the high bit, every row starting on a new byte.
