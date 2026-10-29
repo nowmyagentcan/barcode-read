@@ -1,6 +1,7 @@
 //! Text output for people: codes and the no-code advice on stdout, warnings and errors on stderr.
 
 use std::io::{self, Write};
+use std::time::Duration;
 
 use barcode_read::engine::{FileResult, Report};
 use barcode_read::error::Error;
@@ -70,4 +71,37 @@ pub fn summary(out: &mut impl Write, report: &Report) -> io::Result<()> {
         write!(out, " · {} failed", report.failed)?;
     }
     writeln!(out)
+}
+
+/// `--debug` lines: the type and time per file, each page's size and pass timings, and where a
+/// caught panic happened.
+pub fn debug(err: &mut impl Write, file: &FileResult, took: Duration) -> io::Result<()> {
+    let ms = |d: Duration| format!("{:.1} ms", d.as_secs_f64() * 1000.0);
+    let kind = file.kind.map_or("unknown type", Kind::name);
+    writeln!(err, "debug: {}: {kind}, read in {}", file.path, ms(took))?;
+    for p in &file.pages {
+        let dpi = p.dpi.map(|d| format!(" at {d} dpi")).unwrap_or_default();
+        let passes: Vec<_> = (1..)
+            .zip(&p.passes)
+            .map(|(i, d)| format!("pass {i} {}", ms(*d)))
+            .collect();
+        writeln!(
+            err,
+            "debug: {}: page {} {}x{}{dpi}: {}",
+            file.path,
+            p.page,
+            p.width,
+            p.height,
+            passes.join(", ")
+        )?;
+    }
+    if let Some(e) = &file.error {
+        let at = e
+            .cause
+            .as_ref()
+            .map(|c| format!(" (panicked at {c})"))
+            .unwrap_or_default();
+        writeln!(err, "debug: {}: error {}{at}", file.path, e.code)?;
+    }
+    Ok(())
 }

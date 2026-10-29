@@ -6,6 +6,7 @@ use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Instant;
 
 use barcode_read::engine::{self, Failure, Report};
 use barcode_read::error::Error;
@@ -68,6 +69,9 @@ struct Cli {
     /// print one JSON object
     #[arg(long)]
     json: bool,
+    /// show causes and per-pass timings
+    #[arg(long)]
+    debug: bool,
     /// print help
     #[arg(short, long, action = ArgAction::Help)]
     help: Option<bool>,
@@ -144,7 +148,11 @@ fn read(cli: &Cli, options: &Options) -> io::Result<u8> {
     let (mut out, mut err) = (io::stdout().lock(), io::stderr());
     let mut files = vec![];
     for input in input::expand(&cli.paths, cli.recursive) {
+        let start = Instant::now();
         let file = engine::read_input(&input, options);
+        if cli.debug {
+            text::debug(&mut err, &file, start.elapsed())?;
+        }
         if !cli.json {
             text::file(&mut out, &mut err, &file)?;
         }
