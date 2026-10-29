@@ -3,9 +3,11 @@
 mod common;
 
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use common::{code, encode};
@@ -327,4 +329,44 @@ fn has_a_help_with_the_examples() {
     );
     let extra = Command::new(BIN).args(["mcp", "x.png"]).output().unwrap();
     assert_eq!(extra.status.code(), Some(2));
+}
+
+#[test]
+#[ignore = "known bug: QA-03"]
+fn a_dash_path_leaves_the_message_stream_alone() {
+    let mut child = Command::new(BIN)
+        .arg("mcp")
+        .current_dir(folder("dash"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = BufReader::new(child.stdout.take().unwrap());
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        stdout
+            .lines()
+            .map_while(Result::ok)
+            .for_each(|l| drop(tx.send(l)))
+    });
+    let mut send = |message: Value| writeln!(stdin, "{message}").unwrap();
+    let answer = |id: u64| {
+        let line = rx.recv_timeout(Duration::from_secs(5)).expect("an answer");
+        let response: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["id"], id);
+        response
+    };
+    send(serde_json::from_str(INITIALIZE).unwrap());
+    answer(1);
+    send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+    // The server's stdin carries the protocol, so "-" can't mean a file read from it.
+    send(call(2, json!({"paths": ["-"]})));
+    let read = answer(2)["result"].clone();
+    let failed = &read["structuredContent"]["files"][0]["error"];
+    assert!(read["isError"] == true || !failed.is_null(), "{read}");
+    send(request(3, "ping", json!({})));
+    answer(3);
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
 }

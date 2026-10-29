@@ -749,3 +749,18 @@ fn debug_shows_each_pass_on_stderr_only() {
             .contains("debug: gone.png: error not_found\n")
     );
 }
+
+#[test]
+#[ignore = "known bug: QA-02"]
+fn a_deep_folder_tree_ends_with_a_report() {
+    let dir = folder("deep");
+    let mut deep = dir.join("tree");
+    for _ in 0..1000 {
+        deep.push("d");
+    }
+    fs::create_dir_all(&deep).unwrap();
+    fs::write(deep.join("qr.png"), qr_png("deep down")).unwrap();
+    let run = run(&dir, &["tree", "-r", "--json"], None);
+    assert!(run.code <= 1, "exit {}: {}", run.code, run.stderr);
+    assert_eq!(run.json()["files"].as_array().unwrap().len(), 1);
+}
