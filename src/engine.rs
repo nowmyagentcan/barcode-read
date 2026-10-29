@@ -8,6 +8,8 @@ use std::sync::Once;
 use std::thread;
 use std::time::Duration;
 
+use serde::Serialize;
+
 use crate::decode::{Code, Page, find_codes};
 use crate::error::{Error, Warning, panic_message};
 use crate::input::{self, Input, Kind};
@@ -17,28 +19,68 @@ use crate::{Options, pdf, raster, tiff};
 const WORKER: &str = "reader";
 const WORKER_STACK: usize = 64 << 20;
 
-/// What reading one file gave.
-#[derive(Debug)]
+/// What reading one file gave; it serialises as one entry of the JSON `files` list.
+#[derive(Debug, Serialize)]
 pub struct FileResult {
     pub path: String,
     /// `None` when the file couldn't be identified.
+    #[serde(rename = "type")]
     pub kind: Option<Kind>,
     pub pages: Vec<PageInfo>,
+    #[serde(rename = "barcodes")]
     pub codes: Vec<Code>,
     pub warnings: Vec<Warning>,
     pub error: Option<Error>,
 }
 
 /// A page that was read, at its displayed size.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PageInfo {
     pub page: usize,
     pub width: u32,
     pub height: u32,
     /// The resolution a PDF page was rendered at.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub dpi: Option<u32>,
     /// How long each decoding pass took.
+    #[serde(skip)]
     pub passes: Vec<Duration>,
+}
+
+/// The JSON result of a run: every file, the codes found in all of them, and the files that
+/// failed.
+#[derive(Debug, Serialize)]
+pub struct Report<'a> {
+    pub files: &'a [FileResult],
+    pub found: usize,
+    pub failed: usize,
+}
+
+impl<'a> Report<'a> {
+    pub fn new(files: &'a [FileResult]) -> Self {
+        Self {
+            files,
+            found: files.iter().map(|f| f.codes.len()).sum(),
+            failed: files.iter().filter(|f| f.error.is_some()).count(),
+        }
+    }
+
+    /// 0 when a code was found and every file was read; 1 when nothing was found or a file
+    /// failed; 3 when one hit an internal error. The highest applies.
+    pub fn exit_code(&self) -> u8 {
+        let errors = self.files.iter().filter_map(|f| f.error.as_ref());
+        errors
+            .map(Error::exit_code)
+            .chain([u8::from(self.found == 0)])
+            .max()
+            .unwrap_or_default()
+    }
+}
+
+/// The JSON for an error that stops a run, such as a bad option.
+#[derive(Debug, Serialize)]
+pub struct Failure<'a> {
+    pub error: &'a Error,
 }
 
 /// Loads and reads one input.
@@ -184,6 +226,70 @@ mod tests {
         }
         // About 30 MiB of frames: far past a default 2 MiB thread stack.
         assert_eq!(on_worker(|| depth(30_000)), Ok(30_000));
+    }
+
+    #[test]
+    fn the_json_keeps_the_documented_keys_and_order() {
+        let qr = zxingcpp::create(zxingcpp::BarcodeFormat::QRCode)
+            .from_str("hi")
+            .unwrap()
+            .to_image_with(&zxingcpp::write().scale(4))
+            .unwrap();
+        let (w, h) = (qr.width(), qr.height());
+        let pgm = [format!("P5\n{w} {h}\n255\n").into_bytes(), qr.data()].concat();
+        let files = [
+            read("qr.pgm".into(), pgm, &Options::default()),
+            read_input(
+                &input::expand(&["gone.png".into()], false)[0],
+                &Options::default(),
+            ),
+        ];
+        let c = &files[0].codes[0];
+        let (position, ec) = (
+            serde_json::to_string(&c.position).unwrap(),
+            c.ec_level.as_ref(),
+        );
+        let report = Report::new(&files);
+        assert_eq!(
+            serde_json::to_string(&report).unwrap(),
+            format!(
+                r#"{{"files":[{{"path":"qr.pgm","type":"pnm","pages":[{{"page":1,"width":{w},"height":{h}}}],"barcodes":[{{"page":1,"format":"QR Code","text":"hi","content":"text","bytes_base64":null,"symbology_id":"]Q1","position":{position},"rotation":0,"ec_level":"{}","version":"1","sequence":null}}],"warnings":[],"error":null}},{{"path":"gone.png","type":null,"pages":[],"barcodes":[],"warnings":[],"error":{{"code":"not_found","message":"File not found: gone.png","hint":"Check the path."}}}}],"found":1,"failed":1}}"#,
+                ec.unwrap()
+            )
+        );
+        assert_eq!(report.exit_code(), 1);
+        assert_eq!(Report::new(&files[..1]).exit_code(), 0);
+        let page = PageInfo {
+            page: 2,
+            width: 3,
+            height: 4,
+            dpi: Some(300),
+            passes: vec![],
+        };
+        assert_eq!(
+            serde_json::to_string(&page).unwrap(),
+            r#"{"page":2,"width":3,"height":4,"dpi":300}"#
+        );
+        let e = Error::bad_dpi();
+        assert_eq!(
+            serde_json::to_string(&Failure { error: &e }).unwrap(),
+            r#"{"error":{"code":"bad_dpi","message":"--dpi must be between 72 and 1200.","hint":null}}"#
+        );
+    }
+
+    #[test]
+    fn an_internal_error_outranks_the_others() {
+        let file = |error: Option<Error>| FileResult {
+            error,
+            ..FileResult::new("x".into())
+        };
+        let files = [
+            file(None),
+            file(Some(Error::internal("boom"))),
+            file(Some(Error::empty_file())),
+        ];
+        assert_eq!(Report::new(&files).exit_code(), 3);
+        assert_eq!(Report::new(&[]).exit_code(), 1);
     }
 
     #[test]

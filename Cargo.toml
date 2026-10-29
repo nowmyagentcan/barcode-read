@@ -13,6 +13,8 @@ gif = "0.14"
 # No bundled fonts or CMaps: codes are never drawn in the standard fonts or as CJK text.
 hayro = { version = "0.8.0", default-features = false, features = ["simd"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "gif", "bmp", "webp", "pnm"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 tiff = "0.11.3"
 zune-jpeg = "0.5.15"
 zxing-cpp = { version = "0.5.3", features = ["bundled"] }

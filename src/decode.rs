@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use base64::prelude::{BASE64_STANDARD, Engine};
 use image::{GrayImage, imageops, metadata::Orientation};
+use serde::Serialize;
 use zxingcpp::{
     Barcode, BarcodeFormat, BarcodeReader, Binarizer, ContentType, EanAddOnSymbol, FromStr,
     ImageFormat, ImageView, TextMode,
@@ -16,7 +17,7 @@ use crate::error::Error;
 const UPSCALE_MAX_SIDE: u32 = 1000;
 
 /// One code found on a page.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Code {
     pub page: usize,
     /// zxing-cpp's name of the variant read, e.g. `QR Code`, `EAN-13`.
@@ -38,7 +39,7 @@ pub struct Code {
 }
 
 /// A part of a structured-append sequence.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Sequence {
     pub index: i32,
     /// `None` when the symbol doesn't say how many parts there are.

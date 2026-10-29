@@ -5,6 +5,8 @@ use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
+
 use crate::error::{Error, Unsupported, Warning};
 
 /// How many leading bytes `sniff` looks at.
@@ -128,7 +130,8 @@ impl Input {
 }
 
 /// A readable input type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Kind {
     Pdf,
     Jpeg,

@@ -2,15 +2,18 @@
 
 use std::fmt::Display;
 
+use serde::Serialize;
+
 const USE_SUPPORTED: &str = "Use PNG, JPEG, GIF, BMP, WebP, TIFF, PNM or PDF.";
 
 /// A file, usage or runtime error: a stable `code`, a sentence for people and an optional fix.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Error {
     pub code: &'static str,
     pub message: String,
     pub hint: Option<&'static str>,
     /// Shown by `--debug` only: where a caught panic happened.
+    #[serde(skip)]
     pub cause: Option<String>,
 }
 
@@ -205,7 +208,7 @@ impl Error {
 }
 
 /// A note about a file that was still read.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Warning {
     pub code: &'static str,
     pub message: String,
