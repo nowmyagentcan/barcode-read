@@ -71,7 +71,7 @@ footer svg { width: 18px; height: 18px; }
     <text x="213" y="37" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="15">ABC-123</text>
   </svg>
 
-  <form>
+  <form novalidate>
     <button type="button" id="zone" aria-describedby="chosen">
       <span>Drop images or PDFs here, click to choose, or paste a screenshot (<span id="key">Ctrl</span>+V)</span>
       <span id="chosen"></span>
@@ -212,12 +212,22 @@ form.addEventListener("submit", async ev => {
     failure(out, { message: "No file chosen.", hint: "Drop an image or PDF above, click the box to choose one, or paste a screenshot." });
     return;
   }
-  const opts = { formats: $("#formats").value, pages: $("#pages").value.trim(), dpi: Number($("#dpi").value) || 300, password: $("#password").value, fast: $("#fast").checked };
+  // The browser can't point at a field inside closed Options, so the result says what's wrong.
+  const dpi = Number($("#dpi").value) || 300;
+  if (!Number.isInteger(dpi) || dpi < 72 || dpi > 1200) {
+    $("details").open = true;
+    out.replaceChildren();
+    failure(out, { message: "DPI must be a whole number from 72 to 1200." });
+    $("#dpi").focus();
+    return;
+  }
+  const opts = { formats: $("#formats").value, pages: $("#pages").value.trim(), dpi, password: $("#password").value, fast: $("#fast").checked };
   for (const k in opts) if (opts[k] === "" || opts[k] === false) delete opts[k];
   const status = el("div", "head");
   out.replaceChildren(status);
   for (const [i, file] of chosen.entries()) {
     const wait = setTimeout(() => {
+      if (run !== latest) return;
       out.setAttribute("aria-busy", "true");
       status.innerHTML = '<div class="bar" role="progressbar" aria-label="Reading"></div>';
       status.append(el("p", "muted", `Reading ${i + 1} of ${chosen.length} · ${file.name}`));

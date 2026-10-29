@@ -120,6 +120,33 @@ fn page_copies_the_cli_text_and_guards_the_csv() {
     assert_eq!(page["shown"], "a<ESC>[31m<CR><U+009B><U+202E><BEL><DEL>\tz");
 }
 
+#[test]
+fn page_ends_each_run_cleanly_and_shows_a_bad_dpi() {
+    let out = Command::new("node")
+        .args(["tests/page.js", "src/ui.html"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("the page's script runs in Node.js, which must be on PATH");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let page: Value = serde_json::from_slice(&out.stdout).unwrap();
+    // A slow first file must not leave the newer run marked busy.
+    assert_eq!(page["busy"], Value::Null);
+    // Options is closed, so the field itself can't show why: the result says it.
+    assert_eq!(
+        page["dpi"],
+        json!({
+            "sent": [],
+            "open": true,
+            "shown": "DPI must be a whole number from 72 to 1200.",
+            "focused": true
+        })
+    );
+}
+
 /// `barcode-read ui` on a free port, stopped when dropped.
 struct Server {
     child: Child,
