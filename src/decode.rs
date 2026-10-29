@@ -96,7 +96,7 @@ pub fn find_codes(img: &GrayImage, page: usize, options: &Options) -> Result<Fou
     found.codes = codes.iter().map(|b| code(b, page, halve)).collect();
     found.codes.sort_by_key(|c| {
         let min = |axis: usize| c.position.iter().map(|p| p[axis]).min();
-        (c.page, min(1), min(0))
+        (min(1), min(0))
     });
     Ok(found)
 }
@@ -129,13 +129,8 @@ fn read(img: &GrayImage, reader: &BarcodeReader) -> Result<Vec<Barcode>, Error> 
 /// x/2 - 1/4, which rounds to x/2 rounded down.
 fn code(b: &Barcode, page: usize, halve: bool) -> Code {
     let p = b.position();
-    let corner = |p: zxingcpp::PointI| {
-        if halve {
-            [p.x.div_euclid(2), p.y.div_euclid(2)]
-        } else {
-            [p.x, p.y]
-        }
-    };
+    let s = if halve { 2 } else { 1 };
+    let corner = |p: zxingcpp::PointI| [p.x.div_euclid(s), p.y.div_euclid(s)];
     let content = match b.content_type() {
         ContentType::Text => "text",
         ContentType::Binary => "binary",
