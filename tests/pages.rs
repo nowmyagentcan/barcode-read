@@ -3,9 +3,10 @@
 mod common;
 
 use barcode_read::Options;
+use barcode_read::decode::Page;
 use barcode_read::error::Warning;
 use barcode_read::input::PageList;
-use barcode_read::pdf;
+use barcode_read::{pdf, tiff};
 use common::{pdf_file, read_pages, vector_qr};
 
 const A4: (f32, f32) = (595.0, 842.0);
@@ -120,5 +121,117 @@ fn an_unsupported_security_handler_is_pdf_encryption() {
             "pdf_encryption",
             "This PDF uses an encryption method that isn't supported."
         )
+    );
+}
+
+fn fixture(name: &str) -> Vec<u8> {
+    std::fs::read(format!(
+        "{}/tests/fixtures/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+}
+
+fn texts(read: &common::Read) -> Vec<(usize, &str)> {
+    read.codes
+        .iter()
+        .map(|c| (c.page, c.text.as_str()))
+        .collect()
+}
+
+#[test]
+fn reads_a_group_4_fax_page_by_page() {
+    let read = read_pages(&fixture("fax.tif"), &Options::default());
+    let pages: Vec<_> = read.pages.iter().map(|p| (p.0, p.1)).collect();
+    assert_eq!(pages, [(1, (240, 240)), (2, (240, 240)), (3, (240, 240))]);
+    assert_eq!(texts(&read), [(2, "fax page 2")]);
+    assert!(read.warnings.is_empty());
+    // Min-is-white: blank paper reads as white, not inverted.
+    let mut blank = vec![];
+    let each = |p: Page| blank.push(p.grey.iter().all(|&v| v == 255));
+    tiff::pages(&fixture("fax.tif"), &Options::default(), &mut vec![], each).unwrap();
+    assert_eq!(blank, [true, false, true]);
+    let read = read_pages(&fixture("fax.tif"), &with_pages("2-9"));
+    assert_eq!(texts(&read), [(2, "fax page 2")]);
+    assert_eq!(
+        read.warnings[0].message,
+        "This file has 3 pages; page 4-9 doesn't exist."
+    );
+}
+
+#[test]
+fn a_group_3_page_fails_and_the_next_still_reads() {
+    let read = read_pages(&fixture("fax-g3.tif"), &Options::default());
+    assert_eq!(texts(&read), [(2, "group 4")]);
+    assert_eq!(
+        read.warnings,
+        [Warning {
+            code: "page_failed",
+            message: "Page 1 couldn't be read: Group 3 fax compression isn't supported.".into()
+        }]
+    );
+}
+
+#[test]
+fn reads_scanned_pages_in_every_pdf_image_codec() {
+    let bytes = fixture("scan.pdf");
+    let codecs = [
+        "DCTDecode",
+        "FlateDecode",
+        "CCITTFaxDecode",
+        "JBIG2Decode",
+        "JPXDecode",
+    ];
+    for codec in codecs {
+        let name = format!("/{codec}");
+        assert!(
+            bytes.windows(name.len()).any(|w| w == name.as_bytes()),
+            "{codec}"
+        );
+    }
+    let read = read_pages(&bytes, &Options::default());
+    let expected: Vec<_> = codecs
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (i + 1, *c))
+        .collect();
+    assert_eq!(texts(&read), expected);
+    // Each page's paper is white: no codec's image comes out inverted.
+    let mut corners = vec![];
+    let each = |p: Page| corners.push(p.grey[(3, 3)].0[0]);
+    pdf::pages(bytes, &Options::default(), &mut vec![], each).unwrap();
+    assert!(corners.iter().all(|&v| v > 230), "{corners:?}");
+}
+
+#[test]
+fn an_aes_pdf_opens_only_with_its_password() {
+    let open = |password: Option<&str>| {
+        let options = Options {
+            password: password.map(String::from),
+            ..Options::default()
+        };
+        pdf::pages(fixture("aes.pdf"), &options, &mut vec![], |_| ())
+    };
+    let e = open(None).unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str(), e.hint),
+        (
+            "pdf_password",
+            "This PDF needs a password.",
+            Some("Pass it with --password.")
+        )
+    );
+    let e = open(Some("sesame")).unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str()),
+        ("pdf_wrong_password", "The PDF password is wrong.")
+    );
+    let options = Options {
+        password: Some("open-sesame".into()),
+        ..Options::default()
+    };
+    assert_eq!(
+        texts(&read_pages(&fixture("aes.pdf"), &options)),
+        [(1, "secret page")]
     );
 }
