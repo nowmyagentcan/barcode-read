@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use common::{code, encode, pdf_file};
+use common::{bytes_code, code, encode, pdf_file};
 use image::{GrayImage, ImageFormat, Luma};
 use serde_json::{Value, json};
 use zxingcpp::BarcodeFormat;
@@ -487,6 +487,104 @@ fn exit_codes_follow_what_was_found_and_what_failed() {
 }
 
 #[test]
+fn text_output_has_tags_pages_warnings_and_indented_lines() {
+    let dir = folder("text");
+    let vcard = "BEGIN:VCARD\nVERSION:3.0\nFN:Mei Lee\nEND:VCARD";
+    let gs1 = code(BarcodeFormat::Code128, "(01)09501101530003(10)LOT7", "gs1");
+    let bytes: Vec<u8> = (0..=255).collect();
+    let files = [
+        ("vcard.png", qr_png(vcard)),
+        ("gs1.png", encode(gs1, ImageFormat::Png)),
+        (
+            "bytes.png",
+            encode(bytes_code(BarcodeFormat::QRCode, &bytes), ImageFormat::Png),
+        ),
+        ("scan.pdf", fixture("scan.pdf")),
+    ];
+    for (name, bytes) in &files {
+        fs::write(dir.join(name), bytes).unwrap();
+    }
+    let run = run(
+        &dir,
+        &[
+            "vcard.png",
+            "gs1.png",
+            "bytes.png",
+            "scan.pdf",
+            "--pages",
+            "5-6",
+        ],
+        None,
+    );
+    assert_eq!(run.code, 0);
+    let lines: Vec<_> = run.stdout.lines().collect();
+    assert_eq!(
+        lines[..8],
+        [
+            "vcard.png  QR Code",
+            "  BEGIN:VCARD",
+            "  VERSION:3.0",
+            "  FN:Mei Lee",
+            "  END:VCARD",
+            "gs1.png  Code 128  GS1",
+            "  (01)09501101530003(10)LOT7",
+            "bytes.png  QR Code  binary, 256 bytes",
+        ]
+    );
+    assert!(lines[8].starts_with("  <NUL><SOH><STX>") && lines[8].contains("~<DEL><U+80>"));
+    assert_eq!(
+        lines[lines.len() - 3..],
+        [
+            "scan.pdf  page 5  QR Code",
+            "  JPXDecode",
+            "4 codes in 4 of 4 files"
+        ]
+    );
+    assert_eq!(
+        run.stderr,
+        "! scan.pdf: This file has 5 pages; page 6 doesn't exist.\n"
+    );
+    assert!(!run.stdout.contains('\x1b') && !run.stderr.contains('\x1b'));
+}
+
+#[test]
+fn control_and_bidi_characters_in_payloads_never_reach_the_terminal() {
+    let dir = folder("escape");
+    let payloads = [
+        ("esc.png", "hi\x1b[31mRED\x1b[0m", "hi<ESC>[31mRED<ESC>[0m"),
+        ("cr.png", "one\rtwo", "one<CR>two"),
+        ("c1.png", "x\u{9b}31m", "x<U+009B>31m"),
+        (
+            "rlo.png",
+            "invoice\u{202e}fdp.exe",
+            "invoice<U+202E>fdp.exe",
+        ),
+    ];
+    let mut args = vec![];
+    for (name, text, _) in payloads {
+        fs::write(dir.join(name), qr_png(text)).unwrap();
+        args.push(name);
+    }
+    args.push("missing\u{202e}gnp.png");
+    let run = run(&dir, &args, None);
+    for (_, _, shown) in payloads {
+        assert!(run.stdout.contains(&format!("\n  {shown}\n")), "{shown}");
+    }
+    assert!(
+        run.stderr
+            .starts_with("✗ missing<U+202E>gnp.png: File not found: missing<U+202E>gnp.png\n")
+    );
+    // `run` already failed on any output that isn't UTF-8, so checking characters covers every
+    // byte.
+    for c in run.stdout.chars().chain(run.stderr.chars()) {
+        assert!(!c.is_control() || c == '\n', "{c:?}");
+        assert!(
+            !matches!(c, '\u{61C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+        );
+    }
+}
+
+#[test]
 fn json_pages_carry_dpi_only_for_pdfs() {
     let dir = folder("json");
     fs::write(dir.join("qr.png"), qr_png("png")).unwrap();
@@ -553,6 +651,65 @@ fn a_closed_stdout_or_stderr_ends_the_run_quietly_with_0() {
         let other = if close_stdout { out.stderr } else { out.stdout };
         assert!(!String::from_utf8(other).unwrap().contains("Can't write"));
     }
+}
+
+/// Interactive mode in a real terminal, through util-linux `script`, which gives the binary a
+/// pseudo-terminal and types `typed` into it.
+#[cfg(target_os = "linux")]
+fn terminal(dir: &Path, typed: &str, no_color: bool) -> String {
+    let mut script = Command::new("script");
+    script
+        .args(["-qec", env!("CARGO_BIN_EXE_barcode-read"), "/dev/null"])
+        .current_dir(dir)
+        .env_remove("NO_COLOR")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped());
+    if no_color {
+        script.env("NO_COLOR", "1");
+    }
+    let mut child = script.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(typed.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    String::from_utf8(out.stdout).unwrap().replace("\r\n", "\n")
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn interactive_mode_reads_dropped_paths_in_a_terminal() {
+    let dir = folder("interactive");
+    fs::write(dir.join("boarding pass.png"), qr_png("M1LEE/MEI")).unwrap();
+    let typed = "'boarding pass.png'\n/help\n/quit\nboarding\\ pass.png\n";
+    let plain = terminal(&dir, typed, true);
+    assert!(!plain.contains('\x1b'), "{plain}");
+    for part in [
+        "\n╭─────",
+        "│ ✻ barcode-read 0.1.0 ",
+        "│   Read QR codes and barcodes from images and PDFs. │\n",
+        "\n  Drop files here or type paths · /help · /quit\n\n› ",
+        "  boarding pass.png  QR Code\n    M1LEE/MEI\n\n› ",
+        "  /quit   leave (Ctrl+C works too)\n\n› ",
+    ] {
+        assert!(plain.contains(part), "{part}\n{plain}");
+    }
+    // Lines after /quit aren't read.
+    assert_eq!(plain.matches("M1LEE/MEI").count(), 1, "{plain}");
+    let colour = terminal(&dir, "boarding\\ pass.png\n", false);
+    assert!(
+        colour.contains("\x1b[1m✻ barcode-read\x1b[0m 0.1.0"),
+        "{colour}"
+    );
+    assert!(colour.contains("  \x1b[1mboarding pass.png\x1b[0m  QR Code\n"));
+
+    // Without a terminal the same start is a usage error.
+    let piped = run(&dir, &[], Some(b"boarding\\ pass.png\n"));
+    assert_eq!((piped.code, piped.stdout.as_str()), (2, ""));
+    assert!(piped.stderr.starts_with("✗ No file given.\n"));
 }
 
 #[cfg(unix)]
