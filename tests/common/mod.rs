@@ -1,9 +1,14 @@
-//! Test inputs: codes drawn by zxing-cpp's writer, saved in the image formats the tool reads.
+//! Test inputs: codes drawn by zxing-cpp's writer, saved in the image formats the tool reads,
+//! and a small PDF writer. Each test file uses part of it.
+#![allow(dead_code)]
 
 use std::io::Cursor;
 
-use barcode_read::decode::{Found, Options, find_codes};
-use barcode_read::{input, raster};
+use barcode_read::Options;
+use barcode_read::decode::{Code, Found, Page, find_codes};
+use barcode_read::error::Warning;
+use barcode_read::input::{self, Kind};
+use barcode_read::{pdf, raster, tiff};
 use image::{DynamicImage, ExtendedColorType, GrayImage, ImageEncoder, ImageFormat};
 use zxingcpp::{Barcode, BarcodeFormat};
 
@@ -53,4 +58,88 @@ pub fn with_exif(mut encoder: impl ImageEncoder, img: &GrayImage, orientation: u
     encoder
         .write_image(img, w, h, ExtendedColorType::L8)
         .unwrap();
+}
+
+/// What reading a file gave: each page as (number, displayed size, dpi), the codes and warnings.
+#[derive(Debug, Default)]
+pub struct Read {
+    pub pages: Vec<(usize, (u32, u32), Option<u32>)>,
+    pub codes: Vec<Code>,
+    pub warnings: Vec<Warning>,
+}
+
+/// Reads every page of a file of any type.
+pub fn read_pages(bytes: &[u8], options: &Options) -> Read {
+    let mut read = Read::default();
+    let mut each = |page: Page| {
+        read.pages.push((page.number, page.size(), page.dpi));
+        read.codes.extend(find_codes(&page, options).unwrap().codes);
+    };
+    let mut warnings = vec![];
+    match input::sniff(bytes).unwrap() {
+        Kind::Pdf => pdf::pages(bytes.to_vec(), options, &mut warnings, each).unwrap(),
+        Kind::Tiff => tiff::pages(bytes, &mut warnings, each).unwrap(),
+        kind => each(raster::image(kind, bytes, &mut warnings).unwrap()),
+    }
+    read.warnings = warnings;
+    read
+}
+
+/// A QR drawn as PDF operators: a filled square of `module` points per dark module, the
+/// top-left corner of its quiet zone `left` and `top` points from the top-left of a page
+/// `height` points tall. The quiet zone is 4 modules wide.
+pub fn vector_qr(text: &str, left: f32, top: f32, module: f32, height: f32) -> String {
+    let code = zxingcpp::create(BarcodeFormat::QRCode)
+        .from_str(text)
+        .unwrap();
+    let img = code.to_image_with(&zxingcpp::write().scale(1)).unwrap();
+    let (w, data) = (img.width() as usize, img.data());
+    let mut ops = String::from("0 g\n");
+    for (i, _) in data.iter().enumerate().filter(|(_, v)| **v < 128) {
+        let (x, y) = ((i % w) as f32, (i / w) as f32);
+        let bottom = height - top - (y + 1.0) * module;
+        ops += &format!("{} {bottom} {module} {module} re\n", left + x * module);
+    }
+    ops + "f\n"
+}
+
+/// A PDF with one page per (width, height, content stream), sizes in points.
+pub fn pdf_file(pages: &[(f32, f32, String)]) -> Vec<u8> {
+    let kids: Vec<_> = (0..pages.len())
+        .map(|i| format!("{} 0 R", 3 + 2 * i))
+        .collect();
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        format!(
+            "<< /Type /Pages /Kids [{}] /Count {} >>",
+            kids.join(" "),
+            pages.len()
+        ),
+    ];
+    for (i, (w, h, ops)) in pages.iter().enumerate() {
+        let content = 4 + 2 * i;
+        objects.push(format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w} {h}] /Contents {content} 0 R >>"
+        ));
+        objects.push(format!(
+            "<< /Length {} >>\nstream\n{ops}\nendstream",
+            ops.len() + 1
+        ));
+    }
+    let mut out = String::from("%PDF-1.4\n");
+    let mut offsets = vec![];
+    for (i, object) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out += &format!("{} 0 obj\n{object}\nendobj\n", i + 1);
+    }
+    let xref = out.len();
+    out += &format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1);
+    for offset in offsets {
+        out += &format!("{offset:010} 00000 n \n");
+    }
+    out += &format!(
+        "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+        objects.len() + 1
+    );
+    out.into_bytes()
 }

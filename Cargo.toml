@@ -10,6 +10,8 @@ publish = false
 [dependencies]
 base64 = "0.23"
 gif = "0.14"
+# No bundled fonts or CMaps: codes are never drawn in the standard fonts or as CJK text.
+hayro = { version = "0.8.0", default-features = false, features = ["simd"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "gif", "bmp", "webp", "pnm"] }
 tiff = "0.11.3"
 zune-jpeg = "0.5.15"
@@ -24,9 +26,16 @@ lto = true
 codegen-units = 1
 strip = true
 
-# The C++ decoder is slow without optimisation, so tests build it as in release.
-[profile.dev.package.zxing-cpp]
+# Tests decode and render full pages, which takes seconds without optimisation: our code gets
+# a light pass, dependencies a full one. The C++ decoder also needs debug off, so that cmake-rs
+# builds it as Release.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
 opt-level = 3
+
+[profile.dev.package.zxing-cpp]
 debug = false
 
 # zxing-cpp is pinned to an upstream commit newer than any crates.io release: vendor/zxing-cpp is

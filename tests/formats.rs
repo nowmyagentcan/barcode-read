@@ -3,7 +3,8 @@
 
 mod common;
 
-use barcode_read::decode::{Options, Page, find_codes};
+use barcode_read::Options;
+use barcode_read::decode::{Page, find_codes};
 use barcode_read::{input::Kind, raster};
 use base64::prelude::{BASE64_STANDARD, Engine};
 use common::{bytes_code, code, encode, read, texts, with_exif};

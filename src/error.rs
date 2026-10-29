@@ -257,6 +257,18 @@ impl Warning {
     }
 }
 
+/// The message a panic was raised with.
+pub fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    match (
+        payload.downcast_ref::<&str>(),
+        payload.downcast_ref::<String>(),
+    ) {
+        (Some(s), _) => s.to_string(),
+        (_, Some(s)) => s.clone(),
+        _ => "a panic without a message".into(),
+    }
+}
+
 /// A cause as the middle of a sentence: no trailing full stop, so messages never end in "..".
 fn sentence(cause: impl Display) -> String {
     cause

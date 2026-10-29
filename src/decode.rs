@@ -9,18 +9,11 @@ use zxingcpp::{
     ImageFormat, ImageView, TextMode,
 };
 
+use crate::Options;
 use crate::error::Error;
 
 /// Images whose longer side is at most this get the upscaled third pass.
 const UPSCALE_MAX_SIDE: u32 = 1000;
-
-#[derive(Debug, Clone, Default)]
-pub struct Options {
-    /// Formats and groups to look for; empty means every readable format.
-    pub formats: Vec<BarcodeFormat>,
-    /// One quick pass instead of up to three thorough ones.
-    pub fast: bool,
-}
 
 /// One code found on a page.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +54,8 @@ pub struct Page {
     pub grey: GrayImage,
     /// How the stored pixels are turned for display (EXIF); positions are reported as displayed.
     pub orientation: Orientation,
+    /// The resolution a PDF page was rendered at.
+    pub dpi: Option<u32>,
 }
 
 impl Page {
@@ -69,6 +64,7 @@ impl Page {
             number,
             grey,
             orientation: Orientation::NoTransforms,
+            dpi: None,
         }
     }
 
@@ -308,6 +304,7 @@ mod tests {
         let options = Options {
             formats: parse_formats("datamatrix").unwrap(),
             fast: true,
+            ..Options::default()
         };
         assert!(
             find_codes(&Page::new(1, qr("skipped")), &options)
@@ -318,6 +315,7 @@ mod tests {
         let options = Options {
             formats: parse_formats("all-matrix").unwrap(),
             fast: true,
+            ..Options::default()
         };
         assert_eq!(
             find_codes(&Page::new(1, qr("kept")), &options)

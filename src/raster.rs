@@ -127,7 +127,11 @@ fn jpeg(bytes: &[u8]) -> Result<Page, Error> {
 }
 
 /// Rec. 601 luma as zxing-cpp computes it, with any alpha composited over white.
-pub fn luma<P: Pixel<Subpixel = u8>>(img: &ImageBuffer<P, Vec<u8>>) -> GrayImage {
+pub fn luma<P, C>(img: &ImageBuffer<P, C>) -> GrayImage
+where
+    P: Pixel<Subpixel = u8>,
+    C: std::ops::Deref<Target = [u8]>,
+{
     let pixels = img.pixels().map(|p| {
         let [r, g, b, a] = p.to_rgba().0.map(u32::from);
         let l = (306 * r + 601 * g + 117 * b + 512) >> 10;
