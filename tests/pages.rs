@@ -350,16 +350,18 @@ fn a_scanned_pdf_cut_short_is_not_read_as_blank() {
     assert!(file.error.is_some() || failed, "{:?}", file.warnings);
 }
 
+/// Where `what` first occurs in `s` at or after `from`.
+fn find(s: &[u8], from: usize, what: &[u8]) -> usize {
+    from + s[from..]
+        .windows(what.len())
+        .position(|w| w == what)
+        .unwrap()
+}
+
 #[test]
 fn a_scanned_page_whose_image_cant_be_decoded_fails() {
     // Page 1's JPEG (object 9) zeroed after its first two bytes, its length kept.
     let mut scan = fixture("scan.pdf");
-    let find = |s: &[u8], from: usize, what: &[u8]| {
-        from + s[from..]
-            .windows(what.len())
-            .position(|w| w == what)
-            .unwrap()
-    };
     let data = find(
         &scan,
         find(&scan, 0, b"9 0 obj"),
@@ -460,14 +462,8 @@ fn a_scanned_page_whose_image_is_cut_short_fails() {
     // intact file, as image-to-PDF tools copy a cut-short image: spaces keep every offset.
     for (page, object) in [(1, "9 0 obj"), (2, "11 0 obj"), (3, "13 0 obj")] {
         let mut scan = fixture("scan.pdf");
-        let at = |s: &[u8], from: usize, what: &str| {
-            from + s[from..]
-                .windows(what.len())
-                .position(|w| w == what.as_bytes())
-                .unwrap()
-        };
-        let length = at(&scan, at(&scan, 0, object), "/Length ") + 8;
-        let digits = at(&scan, length, " ") - length;
+        let length = find(&scan, find(&scan, 0, object.as_bytes()), b"/Length ") + 8;
+        let digits = find(&scan, length, b" ") - length;
         let n: usize = std::str::from_utf8(&scan[length..length + digits])
             .unwrap()
             .parse()
@@ -476,8 +472,8 @@ fn a_scanned_page_whose_image_is_cut_short_fails() {
             length..length + digits,
             format!("{:digits$}", n / 2).into_bytes(),
         );
-        let cut = at(
-            &scan, length, "stream
+        let cut = find(
+            &scan, length, b"stream
 ",
         ) + 7
             + n / 2;
