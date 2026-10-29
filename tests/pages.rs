@@ -308,7 +308,6 @@ fn page(contents: usize) -> String {
 }
 
 #[test]
-#[ignore = "known bug: R3-07"]
 fn a_page_whose_content_cant_be_decoded_fails() {
     // Page 1's content stream claims FlateDecode but isn't; page 2 holds a QR.
     let (bad, qr) = (
@@ -342,7 +341,6 @@ fn a_page_whose_content_cant_be_decoded_fails() {
 }
 
 #[test]
-#[ignore = "known bug: R3-07"]
 fn a_scanned_pdf_cut_short_is_not_read_as_blank() {
     // The first fifth of the scanned fixture, as an interrupted download leaves it.
     let mut scan = fixture("scan.pdf");
@@ -350,6 +348,35 @@ fn a_scanned_pdf_cut_short_is_not_read_as_blank() {
     let file = engine::read("cut.pdf".into(), scan, &Options::default());
     let failed = file.warnings.iter().any(|w| w.code == "page_failed");
     assert!(file.error.is_some() || failed, "{:?}", file.warnings);
+}
+
+#[test]
+fn a_scanned_page_whose_image_cant_be_decoded_fails() {
+    // Page 1's JPEG (object 9) zeroed after its first two bytes, its length kept.
+    let mut scan = fixture("scan.pdf");
+    let find = |s: &[u8], from: usize, what: &[u8]| {
+        from + s[from..]
+            .windows(what.len())
+            .position(|w| w == what)
+            .unwrap()
+    };
+    let data = find(
+        &scan,
+        find(&scan, 0, b"9 0 obj"),
+        b"stream
+",
+    ) + 9;
+    scan[data..data + 3000].fill(0);
+    let read = read_pages(&scan, &Options::default());
+    let pages: Vec<_> = texts(&read).iter().map(|t| t.0).collect();
+    let warnings: Vec<_> = read.warnings.iter().map(|w| w.message.as_str()).collect();
+    assert_eq!(
+        (pages, warnings),
+        (
+            vec![2, 3, 4, 5],
+            vec!["Page 1 couldn't be read: part of its content is damaged or missing."]
+        )
+    );
 }
 
 #[test]

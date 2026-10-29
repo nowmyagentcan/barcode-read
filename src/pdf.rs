@@ -1,8 +1,12 @@
 //! PDF pages rendered to grey with hayro, one page in memory at a time.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use hayro::hayro_interpret::InterpreterSettings;
+use hayro::hayro_interpret::{InterpreterSettings, InterpreterWarning};
+use hayro::hayro_syntax::content::ops::TypedInstruction;
+use hayro::hayro_syntax::object::Stream;
 use hayro::hayro_syntax::page::Page as PdfPage;
 use hayro::hayro_syntax::{DecryptionError, LoadPdfError, Pdf};
 use hayro::vello_cpu::color::palette::css::WHITE;
@@ -21,8 +25,8 @@ const MAX_SIDE: u64 = 65_535;
 
 /// Renders the selected pages (`options.pages`) in order at `options.dpi`, or at the highest
 /// whole DPI that fits the page limits (with a warning), and hands each to `each` before
-/// rendering the next. An encrypted file opens with `options.password`. When no selected page
-/// renders, the file fails.
+/// rendering the next. An encrypted file opens with `options.password`. A page whose content
+/// can't be decoded or found fails; when no selected page renders, the file fails.
 pub fn pages(
     bytes: Vec<u8>,
     options: &Options,
@@ -53,7 +57,12 @@ pub fn pages(
             warnings.push(Warning::dpi_reduced(number, options.dpi, dpi));
         }
         match catch_unwind(AssertUnwindSafe(|| grey(page, &cache, dpi))) {
-            Ok(grey) => {
+            Ok(None) => {
+                let reason = "part of its content is damaged or missing";
+                warnings.push(Warning::page_failed(number, reason));
+                failed = true;
+            }
+            Ok(Some(grey)) => {
                 rendered = true;
                 each(Page {
                     dpi: Some(dpi),
@@ -86,15 +95,43 @@ fn pixels(dpi: u32, w: f32, h: f32) -> (u64, u64) {
     ((w * scale) as u64, (h * scale) as u64)
 }
 
-/// Renders on white and converts to grey; the colour pixmap is freed on return.
-fn grey<'a>(page: &'a PdfPage<'a>, cache: &RenderCache<'a>, dpi: u32) -> GrayImage {
+/// Renders on white and converts to grey, or `None` when content is lost: hayro leaves out a
+/// content stream or image it can't decode or find (a damaged or cut-short file) without an
+/// error, and a broken Flate or RunLength stream decodes to nothing. The colour pixmap is
+/// freed on return.
+fn grey<'a>(page: &'a PdfPage<'a>, cache: &RenderCache<'a>, dpi: u32) -> Option<GrayImage> {
+    let raw = page.raw().get::<Stream>("Contents").map(|s| s.raw_data());
+    let lost = match page.page_stream() {
+        None => page.raw().contains_key("Contents"),
+        Some(data) => data.is_empty() && raw.is_some_and(|raw| !raw.trim_ascii().is_empty()),
+    };
+    if lost {
+        return None;
+    }
+    let mut ops = page.typed_operations();
+    while let Some(op) = ops.next() {
+        if let TypedInstruction::XObject(x) = op
+            && page.resources().get_x_object(x.0).is_none()
+        {
+            return None;
+        }
+    }
     let scale = dpi as f32 / 72.0;
     let settings = PixmapSettings {
         x_scale: scale,
         y_scale: scale,
         bg_color: WHITE,
     };
-    let interpreter = InterpreterSettings::default();
+    let failed = Arc::new(AtomicBool::new(false));
+    let sink = failed.clone();
+    let interpreter = InterpreterSettings {
+        warning_sink: Arc::new(move |w| {
+            if matches!(w, InterpreterWarning::ImageDecodeFailure) {
+                sink.store(true, Ordering::Relaxed);
+            }
+        }),
+        ..InterpreterSettings::default()
+    };
     let pixmap = render(
         page,
         cache,
@@ -102,9 +139,12 @@ fn grey<'a>(page: &'a PdfPage<'a>, cache: &RenderCache<'a>, dpi: u32) -> GrayIma
         &RenderSettings::default(),
         &settings,
     );
+    if failed.load(Ordering::Relaxed) {
+        return None;
+    }
     let (w, h) = (pixmap.width().into(), pixmap.height().into());
     let rgba = ImageBuffer::<Rgba<u8>, _>::from_raw(w, h, pixmap.data_as_u8_slice());
-    luma(&rgba.expect("four bytes per pixel"))
+    Some(luma(&rgba.expect("four bytes per pixel")))
 }
 
 #[cfg(test)]
