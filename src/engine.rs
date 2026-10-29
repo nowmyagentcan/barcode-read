@@ -20,7 +20,7 @@ const WORKER: &str = "reader";
 const WORKER_STACK: usize = 64 << 20;
 
 /// What reading one file gave; it serialises as one entry of the JSON `files` list.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub struct FileResult {
     pub path: String,
     /// `None` when the file couldn't be identified.
@@ -88,15 +88,19 @@ pub fn read_input(input: &Input, options: &Options) -> FileResult {
     match input.load() {
         Ok(bytes) => read(input.name.clone(), bytes, options),
         Err(e) => FileResult {
+            path: input.name.clone(),
             error: Some(e),
-            ..FileResult::new(input.name.clone())
+            ..Default::default()
         },
     }
 }
 
 /// Reads a file's bytes; `path` is only reported. A file with an error has no codes.
 pub fn read(path: String, bytes: Vec<u8>, options: &Options) -> FileResult {
-    let mut file = FileResult::new(path);
+    let mut file = FileResult {
+        path,
+        ..Default::default()
+    };
     let read = input::sniff(&bytes).and_then(|kind| {
         file.kind = Some(kind);
         on_worker(|| pages(kind, bytes, options, &mut file))?
@@ -113,19 +117,6 @@ pub fn read(path: String, bytes: Vec<u8>, options: &Options) -> FileResult {
         Ok(()) => {}
     }
     file
-}
-
-impl FileResult {
-    fn new(path: String) -> Self {
-        Self {
-            path,
-            kind: None,
-            pages: vec![],
-            codes: vec![],
-            warnings: vec![],
-            error: None,
-        }
-    }
 }
 
 fn pages(
@@ -280,8 +271,9 @@ mod tests {
     #[test]
     fn an_internal_error_outranks_the_others() {
         let file = |error: Option<Error>| FileResult {
+            path: "x".into(),
             error,
-            ..FileResult::new("x".into())
+            ..Default::default()
         };
         let files = [
             file(None),

@@ -64,10 +64,7 @@ fn folder(dir: &Path, recursive: bool, inputs: &mut Vec<Input>) {
             return inputs.push(Input::new(dir, Source::Failed(error)));
         }
     };
-    entries.sort_by(|a, b| {
-        let name = |e: &fs::DirEntry| e.file_name().into_encoded_bytes();
-        name(a).cmp(&name(b))
-    });
+    entries.sort_by_key(fs::DirEntry::file_name);
     for entry in entries {
         let path = entry.path();
         if entry.file_name().as_encoded_bytes().starts_with(b".") {
