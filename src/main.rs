@@ -1,9 +1,10 @@
 //! The command line: `barcode-read [read] <PATH>... [OPTIONS]`.
 
+mod interactive;
 mod text;
 
 use std::ffi::OsString;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
@@ -36,7 +37,7 @@ Examples:
   cat code.png | barcode-read -
   barcode-read ui";
 
-#[derive(Parser)]
+#[derive(Parser, Default)]
 #[command(
     name = "barcode-read",
     version,
@@ -109,6 +110,7 @@ impl Cli {
 
 fn main() -> ExitCode {
     let mut args: Vec<OsString> = std::env::args_os().collect();
+    let bare = args.len() == 1;
     // Only an exact first argument is a command: `./read` is a file.
     if args.get(1).is_some_and(|a| a == "read") {
         args.remove(1);
@@ -131,12 +133,25 @@ fn main() -> ExitCode {
         Ok(options) => options,
         Err(e) => return usage(&e, cli.json),
     };
-    if cli.paths.is_empty() {
+    let interactive = bare && io::stdin().is_terminal() && io::stdout().is_terminal();
+    if cli.paths.is_empty() && !interactive {
         return usage(&Error::no_input(), cli.json);
     }
     let mut out = Out::new(io::stdout().lock(), Look::stdout());
     let mut err = Out::new(io::stderr(), Look::stderr());
-    finish(read(&cli, &options, &mut out, &mut err), &mut err)
+    let run = if interactive {
+        let read = |paths, out: &mut _, err: &mut _| {
+            let cli = Cli {
+                paths,
+                ..Cli::default()
+            };
+            read(&cli, &options, out, err).map(drop)
+        };
+        interactive::run(io::stdin().lock(), &mut out, &mut err, read).map(|()| 0)
+    } else {
+        read(&cli, &options, &mut out, &mut err)
+    };
+    finish(run, &mut err)
 }
 
 /// The exit code of a run: a reader that hung up on stdout or stderr ends it quietly with 0,
