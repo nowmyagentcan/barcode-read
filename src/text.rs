@@ -131,7 +131,7 @@ pub fn file(
     file: &FileResult,
 ) -> io::Result<()> {
     let look = out.look;
-    let path = look.paint(BOLD, &file.path);
+    let path = look.paint(BOLD, &escape(&file.path));
     let paged = matches!(file.kind, Some(Kind::Pdf | Kind::Tiff));
     for c in &file.codes {
         let mut head = vec![path.clone()];
@@ -149,7 +149,7 @@ pub fn file(
             _ => {}
         }
         out.line(&head.join("  "))?;
-        for line in c.text.split('\n') {
+        for line in escape(&c.text).split('\n') {
             out.line(&format!("  {line}"))?;
         }
     }
@@ -161,7 +161,8 @@ pub fn file(
             }
         } else {
             let mark = err.look.paint(YELLOW, "!");
-            err.line(&format!("{mark} {}: {}", file.path, w.message))?;
+            let warning = escape(&format!("{}: {}", file.path, w.message));
+            err.line(&format!("{mark} {warning}"))?;
         }
     }
     match &file.error {
@@ -173,7 +174,7 @@ pub fn file(
 /// `✗ message` and the hint indented on the next line.
 pub fn error(err: &mut Out<impl Write>, message: &str, hint: Option<&str>) -> io::Result<()> {
     let mark = err.look.paint(RED, err.look.pick("✗", "x"));
-    err.line(&format!("{mark} {message}"))?;
+    err.line(&format!("{mark} {}", escape(message)))?;
     match hint {
         Some(hint) => err.line(&format!("  {hint}")),
         None => Ok(()),
@@ -197,6 +198,34 @@ pub fn summary(out: &mut Out<impl Write>, report: &Report) -> io::Result<()> {
     out.line(&line)
 }
 
+/// zxing-cpp's names for the C0 controls.
+const C0: [&str; 32] = [
+    "NUL", "SOH", "STX", "ETX", "EOT", "ENQ", "ACK", "BEL", "BS", "HT", "LF", "VT", "FF", "CR",
+    "SO", "SI", "DLE", "DC1", "DC2", "DC3", "DC4", "NAK", "SYN", "ETB", "CAN", "EM", "SUB", "ESC",
+    "FS", "GS", "RS", "US",
+];
+
+/// `s` safe for a terminal: C0 controls but `\n` and `\t` as `<ESC>` and the like, DEL as
+/// `<DEL>`, C1 controls and the bidi controls that can disguise text as `<U+202E>` and the like.
+pub fn escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\n' | '\t' => out.push(c),
+            '\0'..='\x1F' => out += &format!("<{}>", C0[c as usize]),
+            '\x7F' => out += "<DEL>",
+            '\u{80}'..='\u{9F}'
+            | '\u{61C}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}' => out += &format!("<U+{:04X}>", c as u32),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// How long a file reads before the spinner shows, and how long each frame stays.
 const SPIN_AFTER: Duration = Duration::from_millis(300);
 const FRAME: Duration = Duration::from_millis(80);
@@ -214,7 +243,7 @@ pub fn spin<T>(err: &Out<impl Write>, name: &str, work: impl FnOnce() -> T) -> T
             spinner(
                 io::stderr(),
                 look,
-                &format!("{indent}{{}} Reading {name}"),
+                &format!("{indent}{{}} Reading {}", escape(name)),
                 stopped,
             )
         });
@@ -253,11 +282,8 @@ fn spinner(mut w: impl Write, look: Look, line: &str, stopped: Receiver<()>) {
 pub fn debug(err: &mut Out<impl Write>, file: &FileResult, took: Duration) -> io::Result<()> {
     let ms = |d: Duration| format!("{:.1} ms", d.as_secs_f64() * 1000.0);
     let kind = file.kind.map_or("unknown type", Kind::name);
-    err.line(&format!(
-        "debug: {}: {kind}, read in {}",
-        file.path,
-        ms(took)
-    ))?;
+    let path = escape(&file.path);
+    err.line(&format!("debug: {path}: {kind}, read in {}", ms(took)))?;
     for p in &file.pages {
         let dpi = p.dpi.map(|d| format!(" at {d} dpi")).unwrap_or_default();
         let passes: Vec<_> = (1..)
@@ -265,8 +291,7 @@ pub fn debug(err: &mut Out<impl Write>, file: &FileResult, took: Duration) -> io
             .map(|(i, d)| format!("pass {i} {}", ms(*d)))
             .collect();
         err.line(&format!(
-            "debug: {}: page {} {}x{}{dpi}: {}",
-            file.path,
+            "debug: {path}: page {} {}x{}{dpi}: {}",
             p.page,
             p.width,
             p.height,
@@ -279,7 +304,7 @@ pub fn debug(err: &mut Out<impl Write>, file: &FileResult, took: Duration) -> io
             .as_ref()
             .map(|c| format!(" (panicked at {c})"))
             .unwrap_or_default();
-        err.line(&format!("debug: {}: error {}{at}", file.path, e.code))?;
+        err.line(&format!("debug: {path}: error {}{at}", e.code))?;
     }
     Ok(())
 }
@@ -370,5 +395,22 @@ mod tests {
         let slow = slow.join().unwrap();
         assert!(slow.starts_with("\r  - Reading scan.pdf\r  \\ Reading scan.pdf\r"));
         assert!(slow.ends_with("\r\x1b[K"));
+    }
+
+    #[test]
+    fn controls_and_bidi_characters_show_by_name() {
+        assert_eq!(
+            escape("hi\x1b[31m\r\0\x7f\u{9b}\u{202e}lmth.exe\u{61c}\u{2069}"),
+            "hi<ESC>[31m<CR><NUL><DEL><U+009B><U+202E>lmth.exe<U+061C><U+2069>"
+        );
+        assert_eq!(escape("a\tb\nc Grüße 東京 ✓"), "a\tb\nc Grüße 東京 ✓");
+        let all: String = (0..=0x2070).filter_map(char::from_u32).collect();
+        let safe = escape(&all);
+        assert!(
+            !safe
+                .chars()
+                .any(|c| c.is_control() && c != '\n' && c != '\t')
+        );
+        assert!(!safe.contains(['\u{200E}', '\u{200F}', '\u{202A}', '\u{2066}']));
     }
 }
