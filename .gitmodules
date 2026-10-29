@@ -1,0 +1,4 @@
+[submodule "vendor/zxing-cpp"]
+	path = vendor/zxing-cpp
+	url = https://github.com/zxing-cpp/zxing-cpp.git
+	shallow = true

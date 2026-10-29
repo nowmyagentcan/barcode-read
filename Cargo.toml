@@ -7,7 +7,20 @@ description = "Read QR codes and barcodes from images and PDF pages"
 repository = "https://github.com/nowmyagentcan/barcode-read"
 publish = false
 
+[dependencies]
+zxing-cpp = { version = "0.5.3", features = ["bundled"] }
+
 [profile.release]
 lto = true
 codegen-units = 1
 strip = true
+
+# The C++ decoder is slow without optimisation, so tests build it as in release.
+[profile.dev.package.zxing-cpp]
+opt-level = 3
+debug = false
+
+# zxing-cpp is pinned to an upstream commit newer than any crates.io release: vendor/zxing-cpp is
+# that commit as a submodule, vendor/zxing-cpp-rs its Rust wrapper (scripts/vendor-zxing.sh).
+[patch.crates-io]
+zxing-cpp = { path = "vendor/zxing-cpp-rs" }
