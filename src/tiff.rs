@@ -3,7 +3,7 @@
 use std::io::Cursor;
 
 use ::tiff::decoder::{BufferLayoutPreference, Decoder, DecodingResult, Limits};
-use ::tiff::tags::{CompressionMethod, Tag};
+use ::tiff::tags::{CompressionMethod, SampleFormat, Tag};
 use ::tiff::{ColorType, TiffError, TiffUnsupportedError};
 use image::{GrayImage, metadata::Orientation};
 
@@ -114,7 +114,7 @@ fn page(tiff: &mut Tiff, number: usize) -> Result<Page, Error> {
                 .collect();
             samples(tiff, color, colours, &v, planar, w, h)
         }
-        (color, pixels) => return Err(unsupported(color, &pixels)),
+        (color, _) => return Err(unsupported(color, layout.sample_format)),
     };
     let grey = img.ok_or_else(|| bad("its pixel data is cut short".into()))?;
     Ok(Page {
@@ -221,9 +221,9 @@ fn samples(
     GrayImage::from_vec(w, h, grey.collect())
 }
 
-fn unsupported(color: ColorType, pixels: &DecodingResult) -> Error {
+fn unsupported(color: ColorType, format: SampleFormat) -> Error {
     let name = match color {
-        ColorType::Gray(_) | ColorType::GrayA(_) | ColorType::Multiband { .. } => "grey",
+        ColorType::Gray(_) | ColorType::Multiband { .. } => "grey",
         ColorType::RGB(_) | ColorType::RGBA(_) => "RGB",
         ColorType::CMYK(_) | ColorType::CMYKA(_) => "CMYK",
         ColorType::Palette(_) => "palette",
@@ -231,14 +231,9 @@ fn unsupported(color: ColorType, pixels: &DecodingResult) -> Error {
         ColorType::Lab(_) => "Lab",
         _ => "colour",
     };
-    let kind = match pixels {
-        DecodingResult::I8(_)
-        | DecodingResult::I16(_)
-        | DecodingResult::I32(_)
-        | DecodingResult::I64(_) => "signed ",
-        DecodingResult::F16(_) | DecodingResult::F32(_) | DecodingResult::F64(_) => {
-            "floating-point "
-        }
+    let kind = match format {
+        SampleFormat::Int => "signed ",
+        SampleFormat::IEEEFP => "floating-point ",
         _ => "",
     };
     let bits = color.bit_depth();
