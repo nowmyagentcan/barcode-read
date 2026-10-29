@@ -872,7 +872,6 @@ fn a_white_is_zero_grey_alpha_tiff_reads_or_is_refused() {
 }
 
 #[test]
-#[ignore = "known bug: R3-05"]
 fn premultiplied_cmyk_is_composited_once() {
     // Premultiplied black ink at full, half and no coverage: over white (no ink) it stays as
     // stored, so half-covered black is mid grey.
@@ -883,7 +882,6 @@ fn premultiplied_cmyk_is_composited_once() {
 }
 
 #[test]
-#[ignore = "known bug: R3-06"]
 fn alpha_after_an_unspecified_extra_sample_is_composited() {
     // ExtraSamples [0, 2]: the second extra sample is the alpha.
     let (grey, other, alpha) = ([0; 3], [255, 0, 77], [0, 255, 128]);

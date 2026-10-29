@@ -261,16 +261,19 @@ fn samples(
     // tiff keeps only the colour samples and, for RGBA and CMYKA, the first extra one.
     let stride = usize::from(color.num_samples());
     let extra = tiff.find_tag_unsigned_vec::<u16>(Tag::ExtraSamples);
-    // ExtraSamples: 1 is premultiplied alpha, 2 plain alpha, 0 other data. Like tiff, an extra
-    // sample without the tag is taken as plain alpha.
-    let alpha = match (color, extra.ok().flatten().unwrap_or_default().first()) {
-        (ColorType::Gray(_) | ColorType::RGB(_) | ColorType::CMYK(_), _) => None,
-        (_, Some(1)) => Some(true),
-        (_, Some(2) | None) => Some(false),
-        _ => None,
+    let extra = extra.ok().flatten().unwrap_or_default();
+    // ExtraSamples: 1 is premultiplied alpha, 2 plain alpha, 0 other data; the alpha is the
+    // first 1 or 2. Like tiff, an extra sample without the tag is taken as plain alpha.
+    let alpha = match color {
+        ColorType::Gray(_) | ColorType::RGB(_) | ColorType::CMYK(_) => None,
+        _ if extra.is_empty() => Some((colours, false)),
+        _ => extra
+            .iter()
+            .position(|e| matches!(e, 1 | 2))
+            .map(|i| (colours + i, extra[i] == 1)),
     };
     let n = w as usize * h as usize;
-    if stride < colours + usize::from(alpha.is_some()) || v.len() < n * stride {
+    if stride < alpha.map_or(colours, |(at, _)| at + 1) || v.len() < n * stride {
         return None;
     }
     let sample = |i: usize, s: usize| {
@@ -293,9 +296,11 @@ fn samples(
         };
         match alpha {
             None => l as u8,
+            // Premultiplied ink over white (no ink) is already the composite.
+            Some((_, true)) if colours == 4 => l as u8,
             // Premultiplied grey is already scaled by its coverage.
-            Some(true) => (l + 255 - s(colours)).min(255) as u8,
-            Some(false) => over_white(l, s(colours)),
+            Some((at, true)) => (l + 255 - s(at)).min(255) as u8,
+            Some((at, false)) => over_white(l, s(at)),
         }
     });
     GrayImage::from_vec(w, h, grey.collect())
