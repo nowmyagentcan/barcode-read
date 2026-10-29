@@ -215,7 +215,7 @@ fn read(
     err: &mut Out<impl Write>,
 ) -> io::Result<u8> {
     let mut files = vec![];
-    for input in input::expand(&cli.paths, cli.recursive) {
+    for input in input::expand(&cli.paths, cli.recursive, true) {
         let start = Instant::now();
         let name = Path::new(&input.name).file_name().unwrap_or_default();
         let file = text::spin(err, &name.to_string_lossy(), || {

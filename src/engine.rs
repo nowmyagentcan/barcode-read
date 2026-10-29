@@ -226,7 +226,7 @@ mod tests {
         let files = [
             read("qr.pgm".into(), pgm, &Options::default()),
             read_input(
-                &input::expand(&["gone.png".into()], false)[0],
+                &input::expand(&["gone.png".into()], false, true)[0],
                 &Options::default(),
             ),
         ];

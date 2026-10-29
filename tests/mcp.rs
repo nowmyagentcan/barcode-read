@@ -332,7 +332,6 @@ fn has_a_help_with_the_examples() {
 }
 
 #[test]
-#[ignore = "known bug: QA-03"]
 fn a_dash_path_leaves_the_message_stream_alone() {
     let mut child = Command::new(BIN)
         .arg("mcp")
@@ -361,10 +360,19 @@ fn a_dash_path_leaves_the_message_stream_alone() {
     answer(1);
     send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
     // The server's stdin carries the protocol, so "-" can't mean a file read from it.
-    send(call(2, json!({"paths": ["-"]})));
-    let read = answer(2)["result"].clone();
-    let failed = &read["structuredContent"]["files"][0]["error"];
-    assert!(read["isError"] == true || !failed.is_null(), "{read}");
+    // On Linux and macOS the device paths name that same stream.
+    let paths: &[&str] = if cfg!(unix) {
+        &["-", "/dev/stdin", "/dev/fd/0"]
+    } else {
+        &["-"]
+    };
+    send(call(2, json!({ "paths": paths })));
+    let files = answer(2)["result"]["structuredContent"]["files"].clone();
+    assert_eq!(files.as_array().unwrap().len(), paths.len(), "{files}");
+    for (path, file) in paths.iter().zip(files.as_array().unwrap()) {
+        assert_eq!(file["path"], *path);
+        assert_eq!(file["error"]["code"], "unreadable", "{file}");
+    }
     send(request(3, "ping", json!({})));
     answer(3);
     drop(stdin);

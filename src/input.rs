@@ -41,13 +41,23 @@ enum Source {
 /// The files `paths` name, in order: `-` is stdin, a folder gives its files with a readable
 /// extension sorted by name, skipping hidden ones, and with `recursive` its subfolders in
 /// place (depth-first; symlinked folders are not followed). A path given twice is read twice.
-pub fn expand(paths: &[PathBuf], recursive: bool) -> Vec<Input> {
+/// Without `streams` (the MCP server, whose stdin carries its messages) `-` and anything that
+/// isn't a regular file or a folder, such as `/dev/stdin` or a pipe, is `unreadable`.
+pub fn expand(paths: &[PathBuf], recursive: bool, streams: bool) -> Vec<Input> {
     let mut inputs = vec![];
     for path in paths {
-        if path.as_os_str() == "-" {
+        let dash = path.as_os_str() == "-";
+        let meta = fs::metadata(path);
+        if dash && streams {
             inputs.push(Input::new(path, Source::Stdin));
-        } else if path.is_dir() {
+        } else if meta.as_ref().is_ok_and(fs::Metadata::is_dir) {
             folder(path, recursive, &mut inputs);
+        } else if !streams && (dash || meta.is_ok_and(|m| !m.is_file())) {
+            let error = Error::unreadable(
+                &path.to_string_lossy(),
+                "only files and folders are read here, not stdin, pipes or devices",
+            );
+            inputs.push(Input::new(path, Source::Failed(error)));
         } else {
             inputs.push(Input::new(path, Source::File(path.clone())));
         }
@@ -77,9 +87,10 @@ fn folder(dir: &Path, recursive: bool, inputs: &mut Vec<Input>) {
             if recursive && !is_link {
                 folder(&path, recursive, inputs);
             }
-        } else if path
-            .extension()
-            .is_some_and(|ext| EXTENSIONS.iter().any(|e| ext.eq_ignore_ascii_case(e)))
+        } else if path.is_file()
+            && path
+                .extension()
+                .is_some_and(|ext| EXTENSIONS.iter().any(|e| ext.eq_ignore_ascii_case(e)))
         {
             inputs.push(Input::new(&path, Source::File(path.clone())));
         }
@@ -316,14 +327,18 @@ mod tests {
         ];
         let root = tree("folder", &files);
         let dir = std::slice::from_ref(&root);
-        let flat = expand(dir, false);
+        let flat = expand(dir, false, true);
         assert_eq!(names(&flat, &root), ["B.jpg", "a.pdf", "b.PNG", "x.tiff"]);
-        let deep = expand(dir, true);
+        let deep = expand(dir, true, true);
         assert_eq!(
             names(&deep, &root),
             ["B.jpg", "a.pdf", "b.PNG", "sub/c.png", "x.tiff"]
         );
-        let twice = expand(&[root.join("a.pdf"), "-".into(), root.join("a.pdf")], false);
+        let twice = expand(
+            &[root.join("a.pdf"), "-".into(), root.join("a.pdf")],
+            false,
+            true,
+        );
         assert_eq!(names(&twice[..1], &root), ["a.pdf"]);
         assert_eq!(twice[1].name, "-");
         assert_eq!(twice[2].name, twice[0].name);
@@ -336,19 +351,19 @@ mod tests {
         let root = tree("links", &["real/a.png", "dir/b.png"]);
         std::os::unix::fs::symlink(root.join("real"), root.join("dir/link")).unwrap();
         std::os::unix::fs::symlink(root.join("real/a.png"), root.join("dir/c.png")).unwrap();
-        let read = expand(&[root.join("dir")], true);
+        let read = expand(&[root.join("dir")], true, true);
         assert_eq!(names(&read, &root), ["dir/b.png", "dir/c.png"]);
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn missing_files_are_not_found_or_a_wildcard() {
-        let load = |name: &str| expand(&[name.into()], false)[0].load().unwrap_err();
+        let load = |name: &str| expand(&[name.into()], false, true)[0].load().unwrap_err();
         assert_eq!(load("no-such.png"), Error::not_found("no-such.png"));
         assert_eq!(load("photos/*.png"), Error::wildcard("photos/*.png"));
         let root = tree("load", &["a.png"]);
         let a = root.join("a.png");
-        assert_eq!(expand(&[a], false)[0].load(), Ok(vec![]));
+        assert_eq!(expand(&[a], false, true)[0].load(), Ok(vec![]));
         fs::remove_dir_all(root).unwrap();
     }
 

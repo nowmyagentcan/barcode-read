@@ -86,7 +86,7 @@ fn read(args: JsonObject) -> Result<Value, Error> {
         args.fast,
     )?;
     let paths: Vec<PathBuf> = args.paths.into_iter().map(PathBuf::from).collect();
-    let files: Vec<_> = input::expand(&paths, args.recursive)
+    let files: Vec<_> = input::expand(&paths, args.recursive, false)
         .iter()
         .map(|input| engine::read_input(input, &options))
         .collect();
