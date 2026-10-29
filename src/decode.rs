@@ -2,10 +2,11 @@
 
 use std::time::{Duration, Instant};
 
+use base64::prelude::{BASE64_STANDARD, Engine};
 use image::{GrayImage, imageops};
 use zxingcpp::{
-    Barcode, BarcodeFormat, BarcodeReader, Binarizer, EanAddOnSymbol, FromStr, ImageFormat,
-    ImageView, TextMode,
+    Barcode, BarcodeFormat, BarcodeReader, Binarizer, ContentType, EanAddOnSymbol, FromStr,
+    ImageFormat, ImageView, TextMode,
 };
 
 use crate::error::Error;
@@ -25,10 +26,31 @@ pub struct Options {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Code {
     pub page: usize,
+    /// zxing-cpp's name of the variant read, e.g. `QR Code`, `EAN-13`.
     pub format: String,
+    /// Human-readable text: GS1 as `(AI)value`, binary bytes escaped as `<NUL>`.
     pub text: String,
+    /// `text`, `binary`, `mixed`, `gs1`, `iso15434` or `unknown_eci`.
+    pub content: &'static str,
+    /// The raw payload, when `content` isn't `text`.
+    pub bytes_base64: Option<String>,
+    /// The AIM symbology identifier, e.g. `]Q1`.
+    pub symbology_id: String,
     /// Corners top-left, top-right, bottom-right, bottom-left (relative to the symbol).
     pub position: [[i32; 2]; 4],
+    pub rotation: i32,
+    pub ec_level: Option<String>,
+    pub version: Option<String>,
+    pub sequence: Option<Sequence>,
+}
+
+/// A part of a structured-append sequence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sequence {
+    pub index: i32,
+    /// `None` when the symbol doesn't say how many parts there are.
+    pub count: Option<i32>,
+    pub id: String,
 }
 
 /// The codes in one image, and how long each pass that ran took.
@@ -114,11 +136,32 @@ fn code(b: &Barcode, page: usize, halve: bool) -> Code {
             [p.x, p.y]
         }
     };
+    let content = match b.content_type() {
+        ContentType::Text => "text",
+        ContentType::Binary => "binary",
+        ContentType::Mixed => "mixed",
+        ContentType::GS1 => "gs1",
+        ContentType::ISO15434 => "iso15434",
+        ContentType::UnknownECI => "unknown_eci",
+    };
+    let extra = |key| Some(b.extra_with_key(key)).filter(|v| !v.is_empty());
+    let (index, count) = (b.sequence_index(), b.sequence_size());
     Code {
         page,
         format: b.format().to_string(),
         text: b.text(),
+        content,
+        bytes_base64: (content != "text").then(|| BASE64_STANDARD.encode(b.bytes())),
+        symbology_id: b.symbology_identifier(),
         position: [p.top_left, p.top_right, p.bottom_right, p.bottom_left].map(corner),
+        rotation: b.rotation(),
+        ec_level: extra("ECLevel"),
+        version: extra("Version"),
+        sequence: (index >= 0 && count >= 0).then(|| Sequence {
+            index,
+            count: (count > 0).then_some(count),
+            id: b.sequence_id(),
+        }),
     }
 }
 
@@ -161,12 +204,17 @@ mod tests {
         }
     }
 
-    fn qr(text: &str) -> GrayImage {
-        let code = zxingcpp::create(BarcodeFormat::QRCode)
-            .from_str(text)
-            .unwrap();
+    fn image(code: zxingcpp::Barcode) -> GrayImage {
         let img = code.to_image_with(&zxingcpp::write().scale(4)).unwrap();
         GrayImage::from_vec(img.width() as u32, img.height() as u32, img.data()).unwrap()
+    }
+
+    fn qr(text: &str) -> GrayImage {
+        image(
+            zxingcpp::create(BarcodeFormat::QRCode)
+                .from_str(text)
+                .unwrap(),
+        )
     }
 
     fn passes(img: &GrayImage, fast: bool) -> usize {
@@ -206,5 +254,35 @@ mod tests {
             fast: true,
         };
         assert_eq!(find_codes(&qr("kept"), 1, &options).unwrap().codes.len(), 1);
+    }
+
+    #[test]
+    fn reports_raw_bytes_only_for_payloads_that_are_not_text() {
+        let found = find_codes(&qr("plain"), 1, &Options::default()).unwrap();
+        let c = &found.codes[0];
+        assert_eq!((c.content, c.bytes_base64.as_deref()), ("text", None));
+        assert_eq!(
+            (c.symbology_id.as_str(), c.rotation, c.sequence.as_ref()),
+            ("]Q1", 0, None)
+        );
+        assert!(
+            c.ec_level.is_some() && c.version.as_deref() == Some("1"),
+            "{c:?}"
+        );
+
+        let bytes: Vec<u8> = (0..=255).collect();
+        let img = image(
+            zxingcpp::create(BarcodeFormat::QRCode)
+                .from_slice(&bytes)
+                .unwrap(),
+        );
+        let c = &find_codes(&img, 1, &Options::default()).unwrap().codes[0];
+        assert_eq!(c.content, "binary");
+        assert_eq!(
+            BASE64_STANDARD
+                .decode(c.bytes_base64.as_ref().unwrap())
+                .unwrap(),
+            bytes
+        );
     }
 }
