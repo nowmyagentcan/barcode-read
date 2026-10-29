@@ -754,7 +754,9 @@ fn debug_shows_each_pass_on_stderr_only() {
 fn a_deep_folder_tree_ends_with_a_report() {
     let dir = folder("deep");
     let mut deep = dir.join("tree");
-    for _ in 0..1000 {
+    // macOS refuses paths over 1024 bytes; Windows overflowed its stack at 600 levels.
+    let levels = if cfg!(target_os = "macos") { 400 } else { 1000 };
+    for _ in 0..levels {
         deep.push("d");
     }
     fs::create_dir_all(&deep).unwrap();
