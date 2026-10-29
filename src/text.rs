@@ -4,6 +4,8 @@
 
 use std::env;
 use std::io::{self, IsTerminal, Write};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread;
 use std::time::Duration;
 
 use barcode_read::engine::{FileResult, Report};
@@ -18,6 +20,8 @@ const YELLOW: &str = "33";
 /// How one stream shows text.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Look {
+    /// A terminal that takes ANSI sequences.
+    pub ansi: bool,
     pub colour: bool,
     pub ascii: bool,
 }
@@ -32,9 +36,10 @@ impl Look {
     }
 
     fn new(terminal: bool, stream: console::Stream) -> Self {
-        let no_colour = env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+        let ansi = terminal && console::enable_ansi(stream);
         Self {
-            colour: terminal && !no_colour && console::enable_ansi(stream),
+            ansi,
+            colour: ansi && env::var_os("NO_COLOR").is_none_or(|v| v.is_empty()),
             ascii: terminal && !console::utf8(),
         }
     }
@@ -192,6 +197,57 @@ pub fn summary(out: &mut Out<impl Write>, report: &Report) -> io::Result<()> {
     out.line(&line)
 }
 
+/// How long a file reads before the spinner shows, and how long each frame stays.
+const SPIN_AFTER: Duration = Duration::from_millis(300);
+const FRAME: Duration = Duration::from_millis(80);
+
+/// Runs `work`; when it takes a while and stderr is a terminal, `⠋ Reading name` spins on
+/// stderr meanwhile and is erased before this returns.
+pub fn spin<T>(err: &Out<impl Write>, name: &str, work: impl FnOnce() -> T) -> T {
+    if !err.look.ansi {
+        return work();
+    }
+    let (stop, stopped) = mpsc::channel();
+    let (look, indent) = (err.look, err.indent);
+    thread::scope(|s| {
+        s.spawn(|| {
+            spinner(
+                io::stderr(),
+                look,
+                &format!("{indent}{{}} Reading {name}"),
+                stopped,
+            )
+        });
+        let result = work();
+        drop(stop);
+        result
+    })
+}
+
+/// Draws `line` (its `{}` the frame) until `stopped` ends, then erases it.
+fn spinner(mut w: impl Write, look: Look, line: &str, stopped: Receiver<()>) {
+    let frames: &[&str] = if look.ascii {
+        &["-", "\\", "|", "/"]
+    } else {
+        &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    };
+    let mut drawn = false;
+    for (i, frame) in frames.iter().cycle().enumerate() {
+        let wait = if i == 0 { SPIN_AFTER } else { FRAME };
+        if stopped.recv_timeout(wait) != Err(RecvTimeoutError::Timeout) {
+            break;
+        }
+        let text = look.paint(DIM, &line.replacen("{}", frame, 1));
+        if write!(w, "\r{text}").and_then(|()| w.flush()).is_err() {
+            return;
+        }
+        drawn = true;
+    }
+    if drawn {
+        let _ = write!(w, "\r\x1b[K");
+    }
+}
+
 /// `--debug` lines: the type and time per file, each page's size and pass timings, and where a
 /// caught panic happened.
 pub fn debug(err: &mut Out<impl Write>, file: &FileResult, took: Duration) -> io::Result<()> {
@@ -235,10 +291,12 @@ mod tests {
     use barcode_read::engine;
 
     const COLOUR: Look = Look {
+        ansi: true,
         colour: true,
         ascii: false,
     };
     const ASCII: Look = Look {
+        ansi: true,
         colour: false,
         ascii: true,
     };
@@ -291,5 +349,26 @@ mod tests {
             String::from_utf8(err.w).unwrap(),
             "  ✗ Unknown command '/x'.\n    Try /help.\n"
         );
+    }
+
+    #[test]
+    fn the_spinner_shows_only_after_a_while_and_erases_itself() {
+        let (stop, stopped) = mpsc::channel::<()>();
+        drop(stop);
+        let mut quick = vec![];
+        spinner(&mut quick, COLOUR, "{} Reading a.png", stopped);
+        assert!(quick.is_empty());
+
+        let (stop, stopped) = mpsc::channel::<()>();
+        let slow = thread::spawn(move || {
+            let mut w = vec![];
+            spinner(&mut w, ASCII, "  {} Reading scan.pdf", stopped);
+            String::from_utf8(w).unwrap()
+        });
+        thread::sleep(Duration::from_secs(1));
+        drop(stop);
+        let slow = slow.join().unwrap();
+        assert!(slow.starts_with("\r  - Reading scan.pdf\r  \\ Reading scan.pdf\r"));
+        assert!(slow.ends_with("\r\x1b[K"));
     }
 }

@@ -4,7 +4,7 @@ mod text;
 
 use std::ffi::OsString;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -157,7 +157,10 @@ fn read(
     let mut files = vec![];
     for input in input::expand(&cli.paths, cli.recursive) {
         let start = Instant::now();
-        let file = engine::read_input(&input, options);
+        let name = Path::new(&input.name).file_name().unwrap_or_default();
+        let file = text::spin(err, &name.to_string_lossy(), || {
+            engine::read_input(&input, options)
+        });
         if cli.debug {
             text::debug(err, &file, start.elapsed())?;
         }
