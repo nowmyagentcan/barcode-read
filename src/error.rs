@@ -41,7 +41,7 @@ impl Error {
     /// The process exit code this error forces: 2 for usage, 3 for runtime and internal, else 1.
     pub fn exit_code(&self) -> u8 {
         match self.code {
-            "no_input" | "unknown_format" | "bad_pages" | "bad_dpi" => 2,
+            "no_input" | "unknown_format" | "bad_pages" | "bad_dpi" | "usage" => 2,
             "internal" | "port_in_use" | "io" => 3,
             _ => 1,
         }
@@ -188,6 +188,15 @@ impl Error {
 
     pub fn bad_dpi() -> Self {
         Self::new("bad_dpi", "--dpi must be between 72 and 1200.", None)
+    }
+
+    /// A command-line error found by the argument parser, as a sentence.
+    pub fn usage(message: String) -> Self {
+        Self::new(
+            "usage",
+            message,
+            Some("Run barcode-read --help to see the options."),
+        )
     }
 
     pub fn port_in_use(port: u16) -> Self {
