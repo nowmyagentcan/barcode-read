@@ -261,6 +261,43 @@ fn reads_a_shrunk_code_128_through_the_upscaled_pass() {
     );
 }
 
+/// zxing-cpp issue #1150: two scan rows both find the stretched finder pattern on the left. Before
+/// the fix the duplicate reached a line trace with no direction, which never ends on ARM64 and
+/// gives a bogus QR result on x86-64.
+#[test]
+fn a_finder_pattern_found_twice_neither_hangs_nor_reads() {
+    let squares = [
+        (4, 5, 14, 39),
+        (6, 9, 12, 35),
+        (7, 11, 11, 33),
+        (44, 18, 51, 25),
+        (45, 19, 50, 24),
+        (46, 20, 49, 23),
+    ];
+    // Nested squares: black, white, black.
+    let img = GrayImage::from_fn(55, 42, |x, y| {
+        let inside = squares
+            .iter()
+            .filter(|&&(x0, y0, x1, y1)| (x0..x1).contains(&x) && (y0..y1).contains(&y));
+        Luma([[255, 0][inside.count() % 2]])
+    });
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let found = read(&png(&img), &Options::default()).codes.len();
+        let view =
+            zxingcpp::ImageView::from_slice(img.as_raw(), 55, 42, zxingcpp::ImageFormat::Lum);
+        let errors = zxingcpp::read()
+            .return_errors(true)
+            .from(view.unwrap())
+            .unwrap();
+        tx.send((found, errors.len())).unwrap();
+    });
+    assert_eq!(
+        rx.recv_timeout(std::time::Duration::from_secs(1)),
+        Ok((0, 0))
+    );
+}
+
 /// A binary PGM (P5): `image` writes PAM (P7) unless told otherwise.
 fn pgm(img: &GrayImage) -> Vec<u8> {
     use image::codecs::pnm::{PnmEncoder, PnmSubtype, SampleEncoding};
