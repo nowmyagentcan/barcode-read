@@ -107,11 +107,8 @@ mod tests {
         // A0 at 300 dpi would be 139 megapixels.
         let a0 = (2384.0, 3370.0);
         assert_eq!(fit(300, a0), Some(160));
-        let (w, h) = pixels(160, a0.0, a0.1);
-        assert!(
-            w * h <= MAX_PIXELS
-                && pixels(161, a0.0, a0.1).0 * pixels(161, a0.0, a0.1).1 > MAX_PIXELS
-        );
+        let ((w, h), (w2, h2)) = (pixels(160, a0.0, a0.1), pixels(161, a0.0, a0.1));
+        assert!(w * h <= MAX_PIXELS && w2 * h2 > MAX_PIXELS);
         // A long strip is bound by its side instead.
         assert_eq!(fit(1200, (14_400.0, 10.0)), Some(327));
         assert_eq!(fit(300, (1e9, 1e9)), None);

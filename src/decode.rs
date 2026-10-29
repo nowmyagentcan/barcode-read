@@ -70,8 +70,12 @@ impl Page {
 
     /// Width and height as displayed.
     pub fn size(&self) -> (u32, u32) {
+        use Orientation::*;
         let (w, h) = self.grey.dimensions();
-        if sideways(self.orientation) {
+        if matches!(
+            self.orientation,
+            Rotate90 | Rotate270 | Rotate90FlipH | Rotate270FlipH
+        ) {
             (h, w)
         } else {
             (w, h)
@@ -194,11 +198,6 @@ fn code(b: &Barcode, page: usize, halve: bool) -> Code {
             id: b.sequence_id(),
         }),
     }
-}
-
-fn sideways(o: Orientation) -> bool {
-    use Orientation::*;
-    matches!(o, Rotate90 | Rotate270 | Rotate90FlipH | Rotate270FlipH)
 }
 
 /// Where a corner of a `w` x `h` stored image shows once its EXIF orientation is applied.

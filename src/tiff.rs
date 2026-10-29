@@ -24,9 +24,12 @@ pub fn pages(
     warnings: &mut Vec<Warning>,
     mut each: impl FnMut(Page),
 ) -> Result<(), Error> {
+    // Room for the largest image allowed (120 megapixels of 16-bit RGBA).
+    let mut limits = Limits::default();
+    limits.decoding_buffer_size = 1 << 30;
     let mut tiff = Decoder::new(Cursor::new(bytes))
         .map_err(|e| Error::corrupt_image("TIFF", e))?
-        .with_limits(limits());
+        .with_limits(limits);
     let mut count = 1;
     while tiff.more_images() {
         if let Err(e) = tiff.next_image() {
@@ -43,13 +46,6 @@ pub fn pages(
         }
     }
     Ok(())
-}
-
-/// Room for the largest image allowed (120 megapixels of 16-bit RGBA).
-fn limits() -> Limits {
-    let mut limits = Limits::default();
-    limits.decoding_buffer_size = 1 << 30;
-    limits
 }
 
 fn page(tiff: &mut Tiff, number: usize) -> Result<Page, String> {
