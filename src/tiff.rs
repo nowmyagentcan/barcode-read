@@ -34,7 +34,10 @@ pub fn pages(
             break;
         }
         if let Err(e) = tiff.next_image() {
-            warnings.push(Warning::page_failed(palette.len() + 1, reason(e)));
+            warnings.push(Warning::page_failed(
+                palette.len() + 1,
+                unreadable(e).message,
+            ));
             break;
         }
     }
@@ -58,7 +61,12 @@ pub fn pages(
     }
     match failed {
         Some(e) if !read && e.code == "corrupt_image" => {
-            Err(Error::corrupt_image("TIFF", e.message))
+            let file = Error::corrupt_image("TIFF", e.message);
+            // A refused variant keeps its own hint; a damaged page gets the file's.
+            Err(Error {
+                hint: e.hint.or(file.hint),
+                ..file
+            })
         }
         Some(e) if !read => Err(e),
         _ => Ok(()),
@@ -322,7 +330,7 @@ fn unsupported(color: ColorType, format: SampleFormat) -> Error {
         _ => "",
     };
     let bits = color.bit_depth();
-    bad(format!(
+    refused(format!(
         "its {bits}-bit {kind}{name} samples aren't supported"
     ))
 }
@@ -343,17 +351,36 @@ fn bad(reason: String) -> Error {
     Error::new("corrupt_image", reason, None)
 }
 
-fn unreadable(e: TiffError) -> Error {
-    bad(reason(e))
+/// A valid page in a variant this tool doesn't read.
+fn refused(reason: String) -> Error {
+    Error::new("corrupt_image", reason, Some("Convert it to PNG first."))
 }
 
-fn reason(e: TiffError) -> String {
-    match e {
-        TiffError::UnsupportedError(TiffUnsupportedError::UnsupportedCompressionMethod(
-            CompressionMethod::Fax3,
-        )) => "Group 3 fax compression isn't supported".into(),
-        e => e.to_string(),
-    }
+fn unreadable(e: TiffError) -> Error {
+    use CompressionMethod as C;
+    use TiffUnsupportedError as U;
+    let TiffError::UnsupportedError(e) = e else {
+        return bad(e.to_string());
+    };
+    refused(match e {
+        U::UnsupportedCompressionMethod(C::Fax3) => {
+            "Group 3 fax compression isn't supported".into()
+        }
+        U::UnsupportedCompressionMethod(C::Huffman) => {
+            "CCITT 1D compression isn't supported".into()
+        }
+        U::UnsupportedCompressionMethod(C::JPEG) => {
+            "old-style JPEG compression isn't supported".into()
+        }
+        U::UnsupportedCompressionMethod(m) => {
+            format!("compression method {} isn't supported", m.to_u16())
+        }
+        U::UnknownCompressionMethod => "its compression method isn't supported".into(),
+        U::HorizontalPredictor(_) | U::FloatingPointPredictor(_) => {
+            "its predictor isn't supported".into()
+        }
+        _ => "its pixel format isn't supported".into(),
+    })
 }
 
 #[cfg(test)]

@@ -86,7 +86,7 @@ The tool returns the CLI's `--json` object as `structuredContent` and as text. A
 - **PDF:** each page is rendered at `--dpi` (default 300); a page over 40 megapixels is rendered at a lower dpi with a warning. Encrypted PDFs take `--password`.
 - **Limits:** 1 GiB per file; images up to 120 megapixels and 65,535 pixels per side.
 - **Hard pictures:** when the first pass finds nothing, a second pass binarizes the whole image differently and, for images up to 1000 pixels, a third reads it at twice the size. `--fast` runs one pass.
-- **Not read:** HEIC, AVIF, JPEG XL, JPEG 2000 and SVG (each gets its own error and a hint), camera or screen capture, URLs. Structured-append parts are reported with their sequence number, not merged. It doesn't write barcodes.
+- **Not read:** HEIC, AVIF, JPEG XL, JPEG 2000 and SVG (each gets its own error and a hint); TIFF pages in Group 3 fax, CCITT 1D or old-style JPEG compression, with floating-point samples, or WhiteIsZero grey with an alpha sample (the page fails, others still read); camera or screen capture, URLs. Structured-append parts are reported with their sequence number, not merged. It doesn't write barcodes.
 - It makes no network requests; `ui` only listens on `127.0.0.1`.
 
 ## How it works

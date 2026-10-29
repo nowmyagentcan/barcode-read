@@ -410,7 +410,7 @@ fn pack(img: &GrayImage, bits: u8, level: impl Fn(u8) -> u8) -> Vec<u8> {
     strip
 }
 
-/// An uncompressed one-page TIFF with `samples` samples of `bits` bits per pixel, `extra` as
+/// An uncompressed (unless `tags` says otherwise) one-page TIFF with `samples` samples of `bits` bits per pixel, `extra` as
 /// its ExtraSamples, `tags` as more (tag, type, values) entries, and one strip per entry of
 /// `strips`: several make it planar (one per plane), one is interleaved. With a TileWidth tag
 /// (322), `strips` are tiles instead, plane after plane. Directory entries come in tag order
@@ -452,6 +452,7 @@ fn raw_tiff(
             (279, long, counts),
         ],
     });
+    entries.retain(|e| tags.iter().all(|t| t.0 != e.0));
     entries.extend(tags.iter().cloned());
     if !extra.is_empty() {
         entries.push((338, short, extra.iter().map(|&e| e.into()).collect()));
@@ -854,7 +855,41 @@ fn a_tiff_filled_from_the_low_bit_reads_or_is_refused() {
 }
 
 #[test]
-#[ignore = "known bug: R3-04"]
+fn a_tiff_variant_that_isnt_read_is_refused_plainly() {
+    let bilevel = |tags| raw_tiff((8, 1), 1, 1, 0, &[], &[vec![0]], tags);
+    let cases = [
+        (
+            bilevel(&[(259, 3, vec![2])]),
+            "CCITT 1D compression isn't supported",
+        ),
+        (
+            bilevel(&[(259, 3, vec![6])]),
+            "old-style JPEG compression isn't supported",
+        ),
+        (
+            bilevel(&[(259, 3, vec![34712])]),
+            "compression method 34712 isn't supported",
+        ),
+        // WhiteIsZero grey with an alpha sample.
+        (
+            raw_tiff((1, 1), 8, 2, 0, &[2], &[vec![0, 255]], &[]),
+            "its pixel format isn't supported",
+        ),
+        (
+            raw_tiff((1, 1), 32, 1, 1, &[], &[vec![0; 4]], &[(339, 3, vec![3])]),
+            "its 32-bit floating-point grey samples aren't supported",
+        ),
+    ];
+    for (tiff, reason) in cases {
+        let file = engine::read("test.tif".into(), tiff, &Options::default());
+        let e = file.error.map(|e| (e.code, e.message, e.hint));
+        let message = format!("Can't decode this TIFF file: {reason}.");
+        let refused = ("corrupt_image", message, Some("Convert it to PNG first."));
+        assert_eq!(e, Some(refused));
+    }
+}
+
+#[test]
 fn a_white_is_zero_grey_alpha_tiff_reads_or_is_refused() {
     let qr = code(QRCode, "white is zero", "");
     let (w, h) = qr.dimensions();
