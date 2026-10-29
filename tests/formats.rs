@@ -400,29 +400,184 @@ fn packed_tiff(img: &GrayImage, bits: u8, level: impl Fn(u8) -> u8) -> Vec<u8> {
             strip.push(byte);
         }
     }
-    let ifd = 8 + strip.len().next_multiple_of(2) as u32;
-    let mut out = [b"II*\0".as_slice(), &ifd.to_le_bytes(), &strip].concat();
-    out.resize(ifd as usize, 0);
     let (w, h) = img.dimensions();
-    let (long, short) = (4, 3);
-    let entries: [(u16, u16, u32); 9] = [
-        (256, long, w),
-        (257, long, h),
-        (258, short, bits.into()),
-        (259, short, 1),
-        (262, short, 1),
-        (273, long, 8),
-        (277, short, 1),
-        (278, long, h),
-        (279, long, strip.len() as u32),
+    raw_tiff(w, h, bits.into(), 1, 1, &[], &[strip])
+}
+
+/// An uncompressed one-page TIFF with `samples` samples of `bits` bits per pixel, `extra` as
+/// its ExtraSamples, and one strip per entry of `strips`: several make it planar (one per
+/// plane), one is interleaved. Directory entries come in tag order from offset `ifd + 2`.
+fn raw_tiff(
+    w: u32,
+    h: u32,
+    bits: u16,
+    samples: u16,
+    photometric: u16,
+    extra: &[u16],
+    strips: &[Vec<u8>],
+) -> Vec<u8> {
+    let mut out = b"II*\0\0\0\0\0".to_vec();
+    let mut offsets = vec![];
+    for strip in strips {
+        offsets.push(out.len() as u32);
+        out.extend(strip);
+    }
+    out.resize(out.len().next_multiple_of(2), 0);
+    let ifd = out.len() as u32;
+    out[4..8].copy_from_slice(&ifd.to_le_bytes());
+    let (short, long) = (3, 4);
+    let mut entries: Vec<(u16, u16, Vec<u32>)> = vec![
+        (256, long, vec![w]),
+        (257, long, vec![h]),
+        (258, short, vec![bits.into(); samples.into()]),
+        (259, short, vec![1]),
+        (262, short, vec![photometric.into()]),
+        (273, long, offsets),
+        (277, short, vec![samples.into()]),
+        (278, long, vec![h]),
+        (279, long, strips.iter().map(|s| s.len() as u32).collect()),
+        (284, short, vec![if strips.len() > 1 { 2 } else { 1 }]),
     ];
+    if !extra.is_empty() {
+        entries.push((338, short, extra.iter().map(|&e| e.into()).collect()));
+    }
+    // Values longer than 4 bytes go after the directory.
+    let far = ifd + 2 + 12 * entries.len() as u32 + 4;
+    let mut tail = vec![];
     out.extend((entries.len() as u16).to_le_bytes());
-    for (tag, kind, value) in entries {
+    for (tag, kind, values) in entries {
+        let mut bytes: Vec<u8> = values
+            .iter()
+            .flat_map(|&v| match kind {
+                3 => (v as u16).to_le_bytes().to_vec(),
+                _ => v.to_le_bytes().to_vec(),
+            })
+            .collect();
         out.extend([tag.to_le_bytes(), kind.to_le_bytes()].concat());
-        out.extend([1u32.to_le_bytes(), value.to_le_bytes()].concat());
+        out.extend((values.len() as u32).to_le_bytes());
+        if bytes.len() > 4 {
+            out.extend((far + tail.len() as u32).to_le_bytes());
+            tail.append(&mut bytes);
+        } else {
+            bytes.resize(4, 0);
+            out.extend(bytes);
+        }
     }
     out.extend(0u32.to_le_bytes());
+    out.extend(tail);
     out
+}
+
+/// Interleaves 8-bit planes into pixels, written at `bits` (8 or 16) bits per sample.
+fn chunky(planes: &[&[u8]], bits: u16) -> Vec<u8> {
+    let pixels = planes[0].len();
+    (0..pixels)
+        .flat_map(|i| planes.iter().map(move |p| p[i]))
+        .flat_map(|v| match bits {
+            16 => (u16::from(v) * 257).to_le_bytes().to_vec(),
+            _ => vec![v],
+        })
+        .collect()
+}
+
+/// The grey image every page of `tiff` decodes to.
+fn tiff_grey(tiff: &[u8]) -> Result<Vec<u8>, String> {
+    let mut grey = vec![];
+    barcode_read::tiff::pages(tiff, &Options::default(), &mut vec![], |p| {
+        grey.extend(p.grey.into_raw())
+    })
+    .map_err(|e| e.message)?;
+    Ok(grey)
+}
+
+fn tiff_texts(tiff: Vec<u8>) -> (Option<String>, Vec<String>) {
+    let file = engine::read("test.tif".into(), tiff, &Options::default());
+    let texts = file.codes.into_iter().map(|c| c.text).collect();
+    (file.error.map(|e| e.message), texts)
+}
+
+#[test]
+#[ignore = "known bug: R2-02"]
+fn a_planar_tiff_reads_like_an_interleaved_one() {
+    let qr = code(QRCode, "planar", "");
+    let (w, h) = qr.dimensions();
+    let opaque = vec![255; qr.len()];
+    for bits in [8, 16] {
+        let (grey, alpha) = (chunky(&[&qr], bits), chunky(&[&opaque], bits));
+        let rgb = vec![grey.clone(), grey.clone(), grey];
+        let mut rgba = rgb.clone();
+        rgba.push(alpha);
+        for (planes, extra) in [(rgb, vec![]), (rgba, vec![2])] {
+            let n = planes.len() as u16;
+            let tiff = raw_tiff(w, h, bits, n, 2, &extra, &planes);
+            let read = tiff_texts(tiff);
+            assert_eq!(
+                read,
+                (Option::None, vec!["planar".into()]),
+                "{bits}-bit, {n} planes"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "known bug: R2-03"]
+fn a_grey_alpha_tiff_reads() {
+    let qr = code(QRCode, "grey alpha", "");
+    let (w, h) = qr.dimensions();
+    let opaque = vec![255; qr.len()];
+    for (bits, extra) in [(8, 2), (16, 2), (8, 1), (8, 0)] {
+        let tiff = raw_tiff(w, h, bits, 2, 1, &[extra], &[chunky(&[&qr, &opaque], bits)]);
+        let read = tiff_texts(tiff);
+        assert_eq!(
+            read,
+            (Option::None, vec!["grey alpha".into()]),
+            "{bits}-bit, extra {extra}"
+        );
+    }
+    // Transparent black, opaque black and half-covered black, composited over white.
+    let (grey, alpha) = ([0, 0, 0], [0, 255, 128]);
+    let tiff = raw_tiff(3, 1, 8, 2, 1, &[2], &[chunky(&[&grey, &alpha], 8)]);
+    assert_eq!(tiff_grey(&tiff), Ok(vec![255, 0, 127]));
+}
+
+#[test]
+#[ignore = "known bug: R2-01"]
+fn associated_alpha_is_composited_once() {
+    // Premultiplied: half-covered white is stored as 128, so over white it stays white.
+    let (colour, alpha) = ([128, 0, 0, 255], [128, 0, 255, 255]);
+    for bits in [8, 16] {
+        let rgba = chunky(&[&colour, &colour, &colour, &alpha], bits);
+        let tiff = raw_tiff(4, 1, bits, 4, 2, &[1], &[rgba]);
+        assert_eq!(tiff_grey(&tiff), Ok(vec![255, 255, 0, 255]), "{bits}-bit");
+    }
+    // Unassociated, the same samples are half-covered grey.
+    let rgba = chunky(&[&colour, &colour, &colour, &alpha], 8);
+    let tiff = raw_tiff(4, 1, 8, 4, 2, &[2], &[rgba]);
+    assert_eq!(tiff_grey(&tiff), Ok(vec![191, 255, 0, 255]));
+}
+
+#[test]
+#[ignore = "known bug: QA-12"]
+fn a_16_bit_or_alpha_cmyk_tiff_reads() {
+    let qr = code(QRCode, "cmyk", "");
+    let (w, h) = qr.dimensions();
+    let (none, ink) = (
+        vec![0; qr.len()],
+        qr.iter().map(|v| 255 - v).collect::<Vec<_>>(),
+    );
+    let opaque = vec![255; qr.len()];
+    let cmyk16 = chunky(&[&none, &none, &none, &ink], 16);
+    let cmyk16 = raw_tiff(w, h, 16, 4, 5, &[], &[cmyk16]);
+    let cmyka = chunky(&[&none, &none, &none, &ink, &opaque], 8);
+    let cmyka = raw_tiff(w, h, 8, 5, 5, &[2], &[cmyka]);
+    for (name, tiff) in [("CMYK 16-bit", cmyk16), ("CMYK + alpha", cmyka)] {
+        assert_eq!(
+            tiff_texts(tiff),
+            (Option::None, vec!["cmyk".into()]),
+            "{name}"
+        );
+    }
 }
 
 #[test]
