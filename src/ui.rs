@@ -139,10 +139,12 @@ fn respond(reader: &mut BufReader<io::Take<&TcpStream>>, port: u16) -> io::Resul
                 && n.iter()
                     .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b))
         };
+        // RFC 9110 §5.5: a NUL or CR inside a field value makes it invalid.
+        let value = |v: &[u8]| !v.trim_ascii_end().iter().any(|b| b"\0\r".contains(b));
         let Some(colon) = line
             .iter()
             .position(|&b| b == b':')
-            .filter(|&i| token(&line[..i]))
+            .filter(|&i| token(&line[..i]) && value(&line[i + 1..]))
         else {
             return Ok(error(400, "bad_request", "Can't read a request header."));
         };

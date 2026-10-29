@@ -419,7 +419,6 @@ fn reads_one_file_at_a_time_while_a_client_stalls() {
 }
 
 #[test]
-#[ignore = "known bug: R2-06"]
 fn refuses_a_nul_or_bare_cr_in_a_header_value() {
     let server = Server::start(&["--no-open"]);
     let local = "POST /api/read HTTP/1.1\r\nHost: 127.0.0.1:{port}";
