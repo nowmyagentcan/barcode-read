@@ -61,6 +61,8 @@ jobs:
           v=v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml)
           [ "$GITHUB_REF_TYPE" != tag ] || [ "$GITHUB_REF_NAME" = "$v" ]
           cargo about generate --locked -c scripts/about.toml scripts/about.hbs -o THIRD-PARTY-LICENSES.txt
+          # A licence text cargo-about filled from a template has no real copyright line.
+          if grep -nE '<(year|owner|copyright holders)>' THIRD-PARTY-LICENSES.txt; then exit 1; fi
           mkdir dist
           for t in $(ls bin); do
             n=barcode-read-$v-$t
