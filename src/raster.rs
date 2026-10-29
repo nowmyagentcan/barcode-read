@@ -95,12 +95,24 @@ pub(crate) fn to_grey(img: DynamicImage) -> GrayImage {
     }
 }
 
-/// JPEG straight to grey with zune-jpeg; CMYK, YCCK and RGB JPEGs go through RGB first.
+/// JPEG straight to grey with zune-jpeg. A file the strict decoder refuses (cut short, damaged
+/// data, stray bytes) is decoded again leniently, as browsers show it, and marked damaged.
 fn jpeg(bytes: &[u8]) -> Result<Page, Error> {
-    let fail = |e| Error::corrupt_image("JPEG", e);
     let options = DecoderOptions::default()
         .set_max_width(65_535)
         .set_max_height(65_535);
+    match decode_jpeg(bytes, options.set_strict_mode(true)) {
+        Err(e) if e.code == "corrupt_image" => Ok(Page {
+            damaged: Some(e),
+            ..decode_jpeg(bytes, options)?
+        }),
+        read => read,
+    }
+}
+
+/// CMYK, YCCK and RGB JPEGs go through RGB first.
+fn decode_jpeg(bytes: &[u8], options: DecoderOptions) -> Result<Page, Error> {
+    let fail = |e| Error::corrupt_image("JPEG", e);
     let mut decoder = JpegDecoder::new_with_options(ZCursor::new(bytes), options);
     decoder.decode_headers().map_err(fail)?;
     let (width, height) = decoder.dimensions().expect("headers are decoded");

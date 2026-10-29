@@ -492,7 +492,6 @@ fn a_cut_short_image_is_corrupt_image() {
 }
 
 #[test]
-#[ignore = "known bug: QA-04"]
 fn a_cut_short_jpeg_is_corrupt_image() {
     let jpeg = encode(code(QRCode, "cut short", ""), ImageFormat::Jpeg);
     for percent in [10, 50, 90] {
@@ -504,6 +503,22 @@ fn a_cut_short_jpeg_is_corrupt_image() {
             "{percent}%"
         );
     }
+}
+
+#[test]
+fn a_cut_short_jpeg_still_gives_a_code_above_the_cut() {
+    let qr = code(QRCode, "above the cut", "");
+    // Noise below the code holds most of the bytes, so the cut lands in it.
+    let mut img = GrayImage::from_fn(qr.width(), qr.height() * 3, |x, y| {
+        Luma([((x * 7919 + y * 104_729) % 251) as u8])
+    });
+    imageops::replace(&mut img, &qr, 0, 0);
+    let jpeg = encode(img, ImageFormat::Jpeg);
+    let cut = jpeg[..jpeg.len() * 3 / 4].to_vec();
+    let file = engine::read("cut.jpg".into(), cut, &Options::default());
+    let texts: Vec<_> = file.codes.iter().map(|c| c.text.as_str()).collect();
+    let error = file.error.map(|e| e.message);
+    assert_eq!((error, texts), (Option::None, vec!["above the cut"]));
 }
 
 #[test]

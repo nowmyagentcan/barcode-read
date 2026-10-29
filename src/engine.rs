@@ -135,6 +135,9 @@ fn pages(
                     dpi: page.dpi,
                     passes: found.passes,
                 });
+                if found.codes.is_empty() {
+                    failed = page.damaged;
+                }
                 file.codes.extend(found.codes);
             }
             Err(e) => failed = Some(e),

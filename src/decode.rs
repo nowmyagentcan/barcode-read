@@ -58,6 +58,8 @@ pub struct Page {
     pub orientation: Orientation,
     /// The resolution a PDF page was rendered at.
     pub dpi: Option<u32>,
+    /// Why the page decoded only in part; it becomes the file's error when no code is found.
+    pub damaged: Option<Error>,
 }
 
 impl Page {
@@ -67,6 +69,7 @@ impl Page {
             grey,
             orientation: Orientation::NoTransforms,
             dpi: None,
+            damaged: None,
         }
     }
 
