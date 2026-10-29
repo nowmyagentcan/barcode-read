@@ -21,7 +21,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - run: cargo build --locked
       - run: cargo test --locked
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo fmt --check
