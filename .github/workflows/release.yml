@@ -28,6 +28,7 @@ jobs:
         run: |
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends g++-12 cmake make git curl ca-certificates
+          ln -s /usr/bin/gcc-12 /usr/local/bin/cc
           echo CC=gcc-12 >> "$GITHUB_ENV"
           echo CXX=g++-12 >> "$GITHUB_ENV"
       - uses: actions/checkout@v7
