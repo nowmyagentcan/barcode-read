@@ -46,12 +46,15 @@ const choose = name => { $("#files").files = [{ name, size: 1 }]; $("#files").fi
   await sleep(600);
   const busy = $("#out").getAttribute("aria-busy");
 
-  $("#dpi").value = "71";
-  sent.length = 0;
-  choose("low-dpi.png");
-  await sleep(50);
-  console.log(JSON.stringify({
-    busy,
-    dpi: { sent, open: $("details").open === true, shown: $("#out").text.replace(/\s+/g, " ").trim(), focused: document.activeElement === $("#dpi") },
-  }));
+  // A DPI the page must refuse without uploading: what it sent and what it shows.
+  const refused = async value => {
+    $("#dpi").value = value;
+    sent.length = 0;
+    choose(`dpi-${value}.png`);
+    await sleep(50);
+    return { sent: [...sent], open: $("details").open === true, shown: $("#out").text.replace(/\s+/g, " ").trim(), focused: document.activeElement === $("#dpi") };
+  };
+  const dpi = await refused("71");
+  const zero = await refused("0");
+  console.log(JSON.stringify({ busy, dpi, zero }));
 })();

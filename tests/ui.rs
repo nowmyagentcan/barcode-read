@@ -120,8 +120,8 @@ fn page_copies_the_cli_text_and_guards_the_csv() {
     assert_eq!(page["shown"], "a<ESC>[31m<CR><U+009B><U+202E><BEL><DEL>\tz");
 }
 
-#[test]
-fn page_ends_each_run_cleanly_and_shows_a_bad_dpi() {
+/// What `tests/page.js` saw the page's own script do: a slow run overtaken, then refused DPIs.
+fn page_runs() -> Value {
     let out = Command::new("node")
         .args(["tests/page.js", "src/ui.html"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
@@ -132,18 +132,29 @@ fn page_ends_each_run_cleanly_and_shows_a_bad_dpi() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let page: Value = serde_json::from_slice(&out.stdout).unwrap();
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+const BAD_DPI: &str = "DPI must be a whole number from 72 to 1200.";
+
+#[test]
+fn page_ends_each_run_cleanly_and_shows_a_bad_dpi() {
+    let page = page_runs();
     // A slow first file must not leave the newer run marked busy.
     assert_eq!(page["busy"], Value::Null);
     // Options is closed, so the field itself can't show why: the result says it.
     assert_eq!(
         page["dpi"],
-        json!({
-            "sent": [],
-            "open": true,
-            "shown": "DPI must be a whole number from 72 to 1200.",
-            "focused": true
-        })
+        json!({ "sent": [], "open": true, "shown": BAD_DPI, "focused": true })
+    );
+}
+
+#[test]
+#[ignore = "known bug: R2-05"]
+fn page_refuses_a_dpi_of_zero() {
+    assert_eq!(
+        page_runs()["zero"],
+        json!({ "sent": [], "open": true, "shown": BAD_DPI, "focused": true })
     );
 }
 
@@ -385,18 +396,43 @@ fn refuses_repeated_headers_framing_and_malformed_requests() {
 
 #[test]
 fn reads_one_file_at_a_time_while_a_client_stalls() {
-    let dir = folder("concurrent");
-    let qr = fs::read(dir.join("qr.png")).unwrap();
     let server = Server::start(&["--no-open"]);
     let _stalled = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+    // Each upload has its own name and payload, so a mixed-up answer shows.
+    let uploads: Vec<_> = (0..8)
+        .map(|i| {
+            let qr = code(BarcodeFormat::QRCode, &format!("upload {i}"), "");
+            (format!("{i}.png"), encode(qr, ImageFormat::Png))
+        })
+        .collect();
     let answers: Vec<(u16, Value)> = std::thread::scope(|s| {
-        let reads: Vec<_> = (0..8)
-            .map(|_| s.spawn(|| server.read("qr.png", "{}", &qr)))
+        let reads: Vec<_> = uploads
+            .iter()
+            .map(|(name, png)| s.spawn(|| server.read(name, "{}", png)))
             .collect();
         reads.into_iter().map(|r| r.join().unwrap()).collect()
     });
-    assert_eq!(answers[0].0, 200);
-    assert!(answers.iter().all(|a| *a == answers[0]));
+    for (i, (status, file)) in answers.iter().enumerate() {
+        assert_eq!(*status, 200);
+        assert_eq!(file["path"], format!("{i}.png"));
+        assert_eq!(file["barcodes"][0]["text"], format!("upload {i}"));
+    }
+}
+
+#[test]
+#[ignore = "known bug: R2-06"]
+fn refuses_a_nul_or_bare_cr_in_a_header_value() {
+    let server = Server::start(&["--no-open"]);
+    let local = "POST /api/read HTTP/1.1\r\nHost: 127.0.0.1:{port}";
+    // RFC 9110 5.5 and RFC 9112 2.2: such a value is invalid, whichever header holds it.
+    for header in [
+        "X-File-Name: qr\0hidden.png",
+        "X-File-Name: qr\rhidden.png",
+        "X-Other: a\0b",
+    ] {
+        let head = format!("{local}\r\n{header}\r\nContent-Length: 0");
+        assert_eq!(server.send(&head, b"").0, 400, "{header:?}");
+    }
 }
 
 #[test]
