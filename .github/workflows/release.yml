@@ -105,6 +105,8 @@ jobs:
               if grep -qiaE 'vcruntime|msvcp|api-ms-win-crt' barcode-read.exe; then echo 'needs the VC++ runtime'; exit 1; fi ;;
             Linux)
               if ldd barcode-read | grep -vE 'linux-vdso|ld-linux|/lib(c|m|gcc_s|stdc\+\+)\.so'; then exit 1; fi
+              # The decoder is C++: without libstdc++ the GLIBCXX check below would prove nothing.
+              ldd barcode-read | grep -q 'libstdc++\.so'
               newest() { { echo "$1"; objdump -T barcode-read | grep -oE "${1%_*}_[0-9.]+"; } | sort -uV | tail -n 1; }
               [ "$(newest GLIBC_2.35)" = GLIBC_2.35 ] && [ "$(newest GLIBCXX_3.4.30)" = GLIBCXX_3.4.30 ] ;;
             macOS)
