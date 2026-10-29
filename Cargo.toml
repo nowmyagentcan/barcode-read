@@ -1,0 +1,13 @@
+[package]
+name = "barcode-read"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Read QR codes and barcodes from images and PDF pages"
+repository = "https://github.com/nowmyagentcan/barcode-read"
+publish = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
