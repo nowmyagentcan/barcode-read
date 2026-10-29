@@ -803,12 +803,14 @@ fn a_palette_tiff_reads() {
     let qr = code(QRCode, "palette", "");
     let (w, h) = qr.dimensions();
     let colours = [[65535; 3], [0; 3], [65535, 0, 0], [0, 0, 65535]];
+    // ColorMap: every red, then every green, then every blue; unlisted entries are black.
+    let map = |bits: u8| -> Vec<u32> {
+        let entry = move |c: usize| (0..1 << bits).map(move |i| colours.get(i).map_or(0, |v| v[c]));
+        (0..3).flat_map(entry).collect()
+    };
     for bits in [1u8, 2, 4, 8] {
-        let size = 1usize << bits;
-        let map = |c: usize| (0..size).map(move |i| colours.get(i).map_or(0, |v| v[c]));
-        let map: Vec<u32> = (0..3).flat_map(map).collect();
         let strip = pack(&qr, bits, |v| u8::from(v < 128));
-        let tags = [(320, 3, map)];
+        let tags = [(320, 3, map(bits))];
         let tiff = raw_tiff((w, h), bits.into(), 1, 3, &[], &[strip], &tags);
         assert_eq!(
             tiff_texts(tiff),
@@ -817,7 +819,6 @@ fn a_palette_tiff_reads() {
         );
     }
     // White, black, red and blue, through Rec. 601.
-    let map = (0..3).flat_map(|c| (0..256).map(move |i| colours.get(i).map_or(0, |v| v[c])));
     let tiff = raw_tiff(
         (4, 1),
         8,
@@ -825,7 +826,7 @@ fn a_palette_tiff_reads() {
         3,
         &[],
         &[vec![0, 1, 2, 3]],
-        &[(320, 3, map.collect())],
+        &[(320, 3, map(8))],
     );
     assert_eq!(tiff_grey(&tiff), Ok(vec![255, 0, 76, 29]));
 }
