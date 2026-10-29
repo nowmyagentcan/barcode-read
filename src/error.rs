@@ -295,6 +295,52 @@ mod tests {
     }
 
     #[test]
+    fn each_unsupported_type_has_its_own_message_and_hint() {
+        let other = Some("Use PNG, JPEG, GIF, BMP, WebP, TIFF, PNM or PDF.");
+        let heic =
+            "Export it as JPEG first (iPhone: Settings > Camera > Formats > Most Compatible).";
+        let cases = [
+            (
+                Unsupported::Heic,
+                "HEIC/HEIF photos aren't supported yet.",
+                Some(heic),
+            ),
+            (
+                Unsupported::Avif,
+                "AVIF images aren't supported yet.",
+                other,
+            ),
+            (
+                Unsupported::JpegXl,
+                "JPEG XL images aren't supported yet.",
+                other,
+            ),
+            (
+                Unsupported::Jpeg2000,
+                "JPEG 2000 images aren't supported yet.",
+                other,
+            ),
+            (
+                Unsupported::Svg,
+                "SVG files aren't supported.",
+                Some("Render it to PNG first."),
+            ),
+            (
+                Unsupported::Other,
+                "This isn't a supported image or PDF.",
+                other,
+            ),
+        ];
+        for (kind, message, hint) in cases {
+            let e = Error::unsupported_format(kind);
+            assert_eq!(
+                (e.code, e.message.as_str(), e.hint),
+                ("unsupported_format", message, hint)
+            );
+        }
+    }
+
+    #[test]
     fn none_found_advice_depends_on_the_type() {
         assert!(Warning::none_found("pdf").message.ends_with("--dpi 600."));
         assert_eq!(Warning::none_found("tiff").message, "No barcode found.");
