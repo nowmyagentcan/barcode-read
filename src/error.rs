@@ -10,6 +10,8 @@ pub struct Error {
     pub code: &'static str,
     pub message: String,
     pub hint: Option<&'static str>,
+    /// Shown by `--debug` only: where a caught panic happened.
+    pub cause: Option<String>,
 }
 
 /// Input types that are recognised but not read.
@@ -29,6 +31,7 @@ impl Error {
             code,
             message: message.into(),
             hint,
+            cause: None,
         }
     }
 

@@ -5,10 +5,10 @@
 use std::io::Cursor;
 
 use barcode_read::Options;
-use barcode_read::decode::{Code, Found, Page, find_codes};
+use barcode_read::decode::{Code, Found, find_codes};
+use barcode_read::engine::{self, PageInfo};
 use barcode_read::error::Warning;
-use barcode_read::input::{self, Kind};
-use barcode_read::{pdf, raster, tiff};
+use barcode_read::{input, raster};
 use image::{DynamicImage, ExtendedColorType, GrayImage, ImageEncoder, ImageFormat};
 use zxingcpp::{Barcode, BarcodeFormat};
 
@@ -68,21 +68,16 @@ pub struct Read {
     pub warnings: Vec<Warning>,
 }
 
-/// Reads every page of a file of any type.
+/// Reads every page of a file of any type, as the tool does.
 pub fn read_pages(bytes: &[u8], options: &Options) -> Read {
-    let mut read = Read::default();
-    let mut each = |page: Page| {
-        read.pages.push((page.number, page.size(), page.dpi));
-        read.codes.extend(find_codes(&page, options).unwrap().codes);
-    };
-    let mut warnings = vec![];
-    match input::sniff(bytes).unwrap() {
-        Kind::Pdf => pdf::pages(bytes.to_vec(), options, &mut warnings, each).unwrap(),
-        Kind::Tiff => tiff::pages(bytes, options, &mut warnings, each).unwrap(),
-        kind => each(raster::image(kind, bytes, &mut warnings).unwrap()),
+    let file = engine::read("test".into(), bytes.to_vec(), options);
+    assert_eq!(file.error, None);
+    let page = |p: &PageInfo| (p.page, (p.width, p.height), p.dpi);
+    Read {
+        pages: file.pages.iter().map(page).collect(),
+        codes: file.codes,
+        warnings: file.warnings,
     }
-    read.warnings = warnings;
-    read
 }
 
 /// A QR drawn as PDF operators: a filled square of `module` points per dark module, the
