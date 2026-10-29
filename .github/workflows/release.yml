@@ -137,6 +137,8 @@ jobs:
             BARCODE_READ_BASE=http://127.0.0.1:8765/dist $s dist/install.sh
           done
           ~/.local/bin/barcode-read --version
+          cmp x/LICENSE ~/.local/share/doc/barcode-read/LICENSE
+          cmp x/THIRD-PARTY-LICENSES.txt ~/.local/share/doc/barcode-read/THIRD-PARTY-LICENSES.txt
       - name: install.sh stops on systems older than glibc 2.35 or without glibc
         if: matrix.target == 'linux-x64'
         run: |
@@ -173,7 +175,7 @@ jobs:
           Set-Content "$dir\notes.old" 'kept'
           powershell -NoProfile -File dist/install.ps1
           $files = Get-ChildItem $dir -Name
-          if ($LASTEXITCODE -or (Compare-Object $files 'notes.old', 'barcode-read.exe')) { throw "left $files" }
+          if ($LASTEXITCODE -or (Compare-Object $files 'notes.old', 'barcode-read.exe', 'LICENSE', 'THIRD-PARTY-LICENSES.txt')) { throw "left $files" }
           Remove-Item "$dir\notes.old"
           # An upgrade from an archive without the exe, or with one that doesn't run, keeps the installed one.
           $zip = (Get-Item dist/*-windows-x64.zip).Name
@@ -185,7 +187,7 @@ jobs:
             "$((Get-FileHash "$case/$zip").Hash)  $zip" | Set-Content "$case/SHA256SUMS"
             $env:BARCODE_READ_BASE = "http://127.0.0.1:8765/$case"
             powershell -NoProfile -File dist/install.ps1
-            if (!$LASTEXITCODE -or (Get-ChildItem $dir).Count -ne 1) { throw "a failed upgrade ($case) lost barcode-read.exe" }
+            if (!$LASTEXITCODE -or (Get-ChildItem $dir).Count -ne 3) { throw "a failed upgrade ($case) lost barcode-read.exe" }
             & "$dir\barcode-read.exe" --version
             if ($LASTEXITCODE) { throw "barcode-read.exe doesn't run after the $case upgrade" }
           }

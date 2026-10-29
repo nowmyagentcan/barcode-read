@@ -28,7 +28,7 @@
     # by a later install.
     $old = "$exe.$(Get-Random).old"
     if (Test-Path $exe) { Move-Item $exe $old }
-    try { Copy-Item "$tmp\x\barcode-read.exe" $dir }
+    try { Copy-Item "$tmp\x\barcode-read.exe", "$tmp\x\LICENSE", "$tmp\x\THIRD-PARTY-LICENSES.txt" $dir }
     catch { if (Test-Path $old) { Move-Item -Force $old $exe }; throw }
     Remove-Item "$exe.*.old" -ErrorAction SilentlyContinue
     $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)

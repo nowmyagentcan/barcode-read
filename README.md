@@ -10,7 +10,7 @@ Windows (PowerShell, no admin; installs to `%LOCALAPPDATA%\Programs\barcode-read
 irm https://github.com/nowmyagentcan/barcode-read/releases/latest/download/install.ps1 | iex
 ```
 
-macOS and Linux (installs to `~/.local/bin`; Linux needs glibc 2.35 or newer, so Ubuntu 22.04, Debian 12, Fedora 36 or later):
+macOS and Linux (installs to `~/.local/bin`, with the licence files in `~/.local/share/doc/barcode-read`; Linux needs glibc 2.35 or newer, so Ubuntu 22.04, Debian 12, Fedora 36 or later):
 
 ```sh
 curl -fsSL https://github.com/nowmyagentcan/barcode-read/releases/latest/download/install.sh | sh
@@ -27,7 +27,7 @@ Both scripts check the archive's SHA-256 against `SHA256SUMS` before installing 
 | Linux arm64 | [barcode-read-v0.1.0-linux-arm64.tar.gz](https://github.com/nowmyagentcan/barcode-read/releases/download/v0.1.0/barcode-read-v0.1.0-linux-arm64.tar.gz) |
 
 With Rust, CMake and a C++20 compiler: `cargo install --git https://github.com/nowmyagentcan/barcode-read --tag v0.1.0 --locked`.
-To remove it, delete the binary (on Windows, the `barcode-read` folder above).
+To remove it, delete the binary and `~/.local/share/doc/barcode-read` (on Windows, the `barcode-read` folder above).
 
 ## Use
 
@@ -105,7 +105,7 @@ The install script doesn't trigger it, because curl downloads carry no quarantin
 
 ## Licence
 
-Apache-2.0, see [LICENSE](LICENSE). Each release archive includes `THIRD-PARTY-LICENSES.txt` for the bundled dependencies, including zxing-cpp's zint and libzueci parts.
+Apache-2.0, see [LICENSE](LICENSE). Each release archive includes `THIRD-PARTY-LICENSES.txt` for the bundled dependencies, including zxing-cpp's zint and libzueci parts; the install scripts install both files with the binary.
 
 ---
 

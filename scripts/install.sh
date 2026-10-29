@@ -1,5 +1,5 @@
 #!/bin/sh
-# Installs barcode-read @VERSION@ into ~/.local/bin after checking the archive's SHA-256.
+# Installs barcode-read @VERSION@ into ~/.local/bin, and its licences into ~/.local/share/doc/barcode-read, after checking the archive's SHA-256.
 # curl -fsSL https://github.com/nowmyagentcan/barcode-read/releases/latest/download/install.sh | sh
 set -eu
 version=@VERSION@
@@ -27,14 +27,16 @@ if [ -z "$expected" ] || [ "${actual%% *}" != "$expected" ]; then
   echo "barcode-read: the SHA-256 of $archive doesn't match SHA256SUMS; nothing was installed." >&2
   exit 1
 fi
-tar -xzf "$tmp/$archive" -C "$tmp" barcode-read
+tar -xzf "$tmp/$archive" -C "$tmp" barcode-read LICENSE THIRD-PARTY-LICENSES.txt
 # An empty file "runs" as an empty script, so the answer is checked too.
 case $("$tmp/barcode-read" --version 2>/dev/null || :) in
   "barcode-read "*) ;;
   *) echo "barcode-read: $archive has no barcode-read that runs here; nothing was installed." >&2; exit 1 ;;
 esac
 dir=$HOME/.local/bin
-mkdir -p "$dir"
+doc=$HOME/.local/share/doc/barcode-read
+mkdir -p "$dir" "$doc"
+mv "$tmp/LICENSE" "$tmp/THIRD-PARTY-LICENSES.txt" "$doc"
 mv "$tmp/barcode-read" "$dir/barcode-read"
 "$dir/barcode-read" --version
 case ":$PATH:" in
