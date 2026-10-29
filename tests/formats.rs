@@ -538,3 +538,14 @@ fn an_unknown_eci_payload_keeps_an_escaped_text() {
         c.text
     );
 }
+
+#[test]
+#[ignore = "known bug: QA-11"]
+fn a_tiff_with_no_readable_page_is_an_error() {
+    let mut tiff = packed_tiff(&GrayImage::new(1, 1), 1, |v| v >> 7);
+    // The first directory entry is the width.
+    let ifd = u32::from_le_bytes(tiff[4..8].try_into().unwrap()) as usize;
+    tiff[ifd + 10..ifd + 14].copy_from_slice(&70_000u32.to_le_bytes());
+    let file = engine::read("wide.tif".into(), tiff, &Options::default());
+    assert_eq!(file.error.map(|e| e.code), Some("image_too_large"));
+}
