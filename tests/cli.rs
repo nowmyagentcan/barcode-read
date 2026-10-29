@@ -751,7 +751,6 @@ fn debug_shows_each_pass_on_stderr_only() {
 }
 
 #[test]
-#[ignore = "known bug: QA-02"]
 fn a_deep_folder_tree_ends_with_a_report() {
     let dir = folder("deep");
     let mut deep = dir.join("tree");

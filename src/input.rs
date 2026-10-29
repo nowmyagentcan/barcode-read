@@ -65,18 +65,14 @@ pub fn expand(paths: &[PathBuf], recursive: bool, streams: bool) -> Vec<Input> {
     inputs
 }
 
+/// Walks with a stack of open listings rather than recursion, so no folder tree is too deep.
 fn folder(dir: &Path, recursive: bool, inputs: &mut Vec<Input>) {
-    let entries = fs::read_dir(dir).and_then(|list| list.collect::<io::Result<Vec<_>>>());
-    let mut entries = match entries {
-        Ok(entries) => entries,
-        Err(e) => {
-            let name = dir.to_string_lossy();
-            let error = Error::unreadable(&name, e);
-            return inputs.push(Input::new(dir, Source::Failed(error)));
-        }
-    };
-    entries.sort_by_key(fs::DirEntry::file_name);
-    for entry in entries {
+    let mut open = vec![list(dir, inputs)];
+    while let Some(listing) = open.last_mut() {
+        let Some(entry) = listing.next() else {
+            open.pop();
+            continue;
+        };
         let path = entry.path();
         if entry.file_name().as_encoded_bytes().starts_with(b".") {
             continue;
@@ -85,7 +81,7 @@ fn folder(dir: &Path, recursive: bool, inputs: &mut Vec<Input>) {
         let is_link = entry.file_type().is_ok_and(|t| t.is_symlink());
         if path.is_dir() {
             if recursive && !is_link {
-                folder(&path, recursive, inputs);
+                open.push(list(&path, inputs));
             }
         } else if path.is_file()
             && path
@@ -93,6 +89,22 @@ fn folder(dir: &Path, recursive: bool, inputs: &mut Vec<Input>) {
                 .is_some_and(|ext| EXTENSIONS.iter().any(|e| ext.eq_ignore_ascii_case(e)))
         {
             inputs.push(Input::new(&path, Source::File(path.clone())));
+        }
+    }
+}
+
+/// A folder's entries sorted by name; one that can't be listed is an `unreadable` input.
+fn list(dir: &Path, inputs: &mut Vec<Input>) -> std::vec::IntoIter<fs::DirEntry> {
+    let entries = fs::read_dir(dir).and_then(|list| list.collect::<io::Result<Vec<_>>>());
+    match entries {
+        Ok(mut entries) => {
+            entries.sort_by_key(fs::DirEntry::file_name);
+            entries.into_iter()
+        }
+        Err(e) => {
+            let error = Error::unreadable(&dir.to_string_lossy(), e);
+            inputs.push(Input::new(dir, Source::Failed(error)));
+            vec![].into_iter()
         }
     }
 }
