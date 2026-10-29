@@ -297,7 +297,6 @@ fn a_fax_filled_from_the_low_bit_reads_or_is_refused() {
 }
 
 #[test]
-#[ignore = "known bug: R3-03"]
 fn reads_lzw_tiles() {
     // libtiff's LZW with the horizontal predictor in 16 x 16 tiles.
     let read = read_pages(&fixture("lzw-tiles.tif"), &Options::default());

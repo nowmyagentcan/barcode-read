@@ -133,8 +133,14 @@ fn page(tiff: &mut Tiff, number: usize, palette: bool) -> Result<Page, Error> {
     };
     let layout = tiff.image_buffer_layout().map_err(unreadable)?;
     let planar = layout.planes > 1 && color.bit_depth() % 8 == 0;
-    let pixels = match planar {
-        true => planes(tiff, &layout, color.bit_depth() / 8, w, h)?,
+    let bits = u32::from(color.bit_depth())
+        * if planar {
+            1
+        } else {
+            u32::from(color.num_samples())
+        };
+    let pixels = match planar || tiff.get_chunk_type() == ChunkType::Tile {
+        true => chunks(tiff, &layout, bits, w, h)?,
         false => tiff.read_image().map_err(unreadable)?,
     };
     let colours = match color {
@@ -198,13 +204,14 @@ fn limits() -> Limits {
     limits
 }
 
-/// Every plane of a planar page of `bytes`-byte samples, one after another. It's read chunk by
-/// chunk because tiff 0.11.3 takes the bottom tiles of every plane after the first as whole
-/// tiles and overruns its buffer (image-rs/image-tiff#403); rows past the image are dropped.
-fn planes(
+/// The page chunk by chunk (tiles or strips), plane after plane, as rows of `bits`-bit pixels.
+/// Each chunk is read at its full width and cropped here: tiff 0.11.3 overruns its buffer on the
+/// bottom tiles of planar pages (image-rs/image-tiff#403) and loses LZW data when it crops tiles
+/// itself (image-rs/image-tiff#395).
+fn chunks(
     tiff: &mut Tiff,
     layout: &BufferLayoutPreference,
-    bytes: u8,
+    bits: u32,
     w: u32,
     h: u32,
 ) -> Result<DecodingResult, Error> {
@@ -215,19 +222,26 @@ fn planes(
     let (tw, th) = tiff.chunk_dimensions();
     let across = w.div_ceil(tw);
     let per_plane = across * h.div_ceil(th);
-    let (row, sample) = (w as usize * usize::from(bytes), usize::from(bytes));
-    for chunk in 0..per_plane * layout.planes as u32 {
-        let (plane, i) = (chunk / per_plane, chunk % per_plane);
+    let bytes = |pixels: u32| (pixels as usize * bits as usize).div_ceil(8);
+    let (row, stride) = (bytes(w), bytes(tw));
+    let mut chunk = DecodingResult::U8(vec![]);
+    for i in 0..per_plane * layout.planes as u32 {
+        tiff.read_chunk_to_buffer(&mut chunk, i, stride)
+            .map_err(unreadable)?;
+        let (plane, i) = (i / per_plane, i % per_plane);
         let (x, y) = (i % across * tw, i / across * th);
-        let width = (w - x).min(tw) as usize * sample;
-        let mut tile = tiff.read_chunk(chunk).map_err(unreadable)?;
-        let tile = tile.as_buffer(0);
-        let rows = tile.as_bytes().chunks_exact(width);
-        for (r, src) in rows.take((h - y).min(th) as usize).enumerate() {
-            let at = (plane * h + y) as usize * row + r * row + x as usize * sample;
-            let dst = out.get_mut(at..at + width);
-            dst.ok_or_else(|| bad("its pixel data is cut short".into()))?
-                .copy_from_slice(src);
+        let width = bytes((w - x).min(tw));
+        let data = chunk.as_buffer(0);
+        let rows = data
+            .as_bytes()
+            .chunks(stride)
+            .take((h - y).min(th) as usize);
+        for (r, src) in rows.enumerate() {
+            let at = (plane * h + y) as usize * row + r * row + bytes(x);
+            let (dst, src) = (out.get_mut(at..at + width), src.get(..width));
+            dst.zip(src)
+                .ok_or_else(|| bad("its pixel data is cut short".into()))
+                .map(|(dst, src)| dst.copy_from_slice(src))?;
         }
     }
     Ok(pixels)
