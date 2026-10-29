@@ -392,3 +392,140 @@ fn a_pdf_with_no_pages_is_an_error() {
         assert!(file.error.is_some(), "{name}: {:?}", file.warnings);
     }
 }
+
+/// Reads a one-page PDF whose page dictionary is `page` (object 3) followed by `objects`
+/// (from object 4).
+fn one_page(page: &str, objects: &[String]) -> engine::FileResult {
+    let mut all = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] {page} >>"),
+    ];
+    all.extend_from_slice(objects);
+    engine::read("p.pdf".into(), pdf_objects(&all, ""), &Options::default())
+}
+
+fn stream(dict: &str, data: &str) -> String {
+    format!(
+        "<< /Length {} {dict} >>\nstream\n{data}\nendstream",
+        data.len()
+    )
+}
+
+fn failed(file: &engine::FileResult) -> bool {
+    file.error.is_some() || file.warnings.iter().any(|w| w.code == "page_failed")
+}
+
+const BROKEN: &str = "not deflate data";
+
+#[test]
+#[ignore = "known bug: R4-01"]
+fn a_damaged_stream_in_a_content_array_fails() {
+    let qr = stream("", &vector_qr("array", 100.0, 100.0, 3.0, A4.1));
+    let broken = stream("/Filter /FlateDecode", BROKEN);
+    for (name, contents) in [
+        ("damaged", "[4 0 R]"),
+        ("missing", "[9 0 R]"),
+        ("damaged and good", "[4 0 R 5 0 R]"),
+    ] {
+        let file = one_page(
+            &format!("/Contents {contents}"),
+            &[broken.clone(), qr.clone()],
+        );
+        assert!(failed(&file), "{name}: {:?}", file.warnings);
+    }
+}
+
+#[test]
+#[ignore = "known bug: R4-01"]
+fn a_damaged_form_fails_the_page() {
+    let form = "/Type /XObject /Subtype /Form /BBox [0 0 595 842]";
+    let page = "/Contents 4 0 R /Resources << /XObject << /F 5 0 R >> >>";
+    for (name, inner) in [
+        (
+            "damaged",
+            stream(&format!("{form} /Filter /FlateDecode"), BROKEN),
+        ),
+        ("drawing a missing form", stream(form, "/Lost Do")),
+    ] {
+        let file = one_page(page, &[stream("", "/F Do"), inner]);
+        assert!(failed(&file), "{name}: {:?}", file.warnings);
+    }
+}
+
+#[test]
+#[ignore = "known bug: R4-01"]
+fn a_scanned_page_whose_image_is_cut_short_fails() {
+    // Page 1's JPEG, page 2's Flate and page 3's Group 4 image each cut to half inside an
+    // intact file, as image-to-PDF tools copy a cut-short image: spaces keep every offset.
+    for (page, object) in [(1, "9 0 obj"), (2, "11 0 obj"), (3, "13 0 obj")] {
+        let mut scan = fixture("scan.pdf");
+        let at = |s: &[u8], from: usize, what: &str| {
+            from + s[from..]
+                .windows(what.len())
+                .position(|w| w == what.as_bytes())
+                .unwrap()
+        };
+        let length = at(&scan, at(&scan, 0, object), "/Length ") + 8;
+        let digits = at(&scan, length, " ") - length;
+        let n: usize = std::str::from_utf8(&scan[length..length + digits])
+            .unwrap()
+            .parse()
+            .unwrap();
+        scan.splice(
+            length..length + digits,
+            format!("{:digits$}", n / 2).into_bytes(),
+        );
+        let cut = at(
+            &scan, length, "stream
+",
+        ) + 7
+            + n / 2;
+        let mut end = b"endstream".to_vec();
+        end.resize(9 + n - n / 2, b' ');
+        scan.splice(cut..cut + end.len(), end);
+        let file = engine::read("scan.pdf".into(), scan, &Options::default());
+        let lost = format!("Page {page} couldn't be read");
+        assert!(
+            file.warnings.iter().any(|w| w.message.starts_with(&lost)),
+            "{object}: {:?}",
+            file.warnings
+        );
+    }
+}
+
+#[test]
+#[ignore = "known bug: R4-02"]
+fn empty_or_null_content_is_a_blank_page() {
+    // zlib's output for no data, so a valid Flate stream that decodes to nothing.
+    let empty = stream(
+        "/Filter [/ASCIIHexDecode /FlateDecode]",
+        "789c030000000001>",
+    );
+    let qr = vector_qr("stamp", 100.0, 100.0, 3.0, A4.1);
+    let appearance = stream("/Type /XObject /Subtype /Form /BBox [0 0 595 842]", &qr);
+    let stamp = "<< /Type /Annot /Subtype /Stamp /Rect [0 0 595 842] /F 4 /AP << /N 6 0 R >> >>";
+    for (name, contents) in [("empty", "4 0 R"), ("null", "null")] {
+        let file = one_page(
+            &format!("/Contents {contents}"),
+            std::slice::from_ref(&empty),
+        );
+        assert!(
+            file.error.is_none() && !failed(&file),
+            "{name}: {:?}",
+            file.warnings
+        );
+        let page = format!("/Contents {contents} /Annots [5 0 R]");
+        let file = one_page(&page, &[empty.clone(), stamp.into(), appearance.clone()]);
+        let texts: Vec<_> = file.codes.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, ["stamp"], "{name}: {:?}", file.warnings);
+    }
+}
+
+#[test]
+#[ignore = "known bug: VR-05"]
+fn a_content_stream_with_an_unknown_filter_fails() {
+    let content = stream("/Filter /NoSuchFilter", BROKEN);
+    let file = one_page("/Contents 4 0 R", &[content]);
+    assert!(failed(&file), "{:?}", file.warnings);
+}
