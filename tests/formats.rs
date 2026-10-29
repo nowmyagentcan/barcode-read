@@ -385,6 +385,13 @@ fn animated_webp(stills: &[Vec<u8>]) -> Vec<u8> {
 /// An uncompressed one-strip TIFF of `bits`-bit grey samples (0 is black), each row padded to
 /// a byte; `level` gives the sample for a pixel of `img`.
 fn packed_tiff(img: &GrayImage, bits: u8, level: impl Fn(u8) -> u8) -> Vec<u8> {
+    let (w, h) = img.dimensions();
+    let strip = pack(img, bits, level);
+    raw_tiff((w, h), bits.into(), 1, 1, &[], &[strip], &[])
+}
+
+/// `level` of each pixel of `img` in `bits` bits, packed from the high bit, rows padded to a byte.
+fn pack(img: &GrayImage, bits: u8, level: impl Fn(u8) -> u8) -> Vec<u8> {
     let mut strip = vec![];
     for row in img.rows() {
         let (mut byte, mut used) = (0, 0);
@@ -400,14 +407,14 @@ fn packed_tiff(img: &GrayImage, bits: u8, level: impl Fn(u8) -> u8) -> Vec<u8> {
             strip.push(byte);
         }
     }
-    let (w, h) = img.dimensions();
-    raw_tiff((w, h), bits.into(), 1, 1, &[], &[strip], Option::None)
+    strip
 }
 
 /// An uncompressed one-page TIFF with `samples` samples of `bits` bits per pixel, `extra` as
-/// its ExtraSamples, and one strip per entry of `strips`: several make it planar (one per
-/// plane), one is interleaved. With `tile`, `strips` are square tiles of that side instead,
-/// plane after plane. Directory entries come in tag order from offset `ifd + 2`.
+/// its ExtraSamples, `tags` as more (tag, type, values) entries, and one strip per entry of
+/// `strips`: several make it planar (one per plane), one is interleaved. With a TileWidth tag
+/// (322), `strips` are tiles instead, plane after plane. Directory entries come in tag order
+/// from offset `ifd + 2`.
 fn raw_tiff(
     (w, h): (u32, u32),
     bits: u16,
@@ -415,7 +422,7 @@ fn raw_tiff(
     photometric: u16,
     extra: &[u16],
     strips: &[Vec<u8>],
-    tile: Option<u32>,
+    tags: &[(u16, u16, Vec<u32>)],
 ) -> Vec<u8> {
     let mut out = b"II*\0\0\0\0\0".to_vec();
     let mut offsets = vec![];
@@ -437,19 +444,15 @@ fn raw_tiff(
         (284, short, vec![if strips.len() > 1 { 2 } else { 1 }]),
     ];
     let counts = strips.iter().map(|s| s.len() as u32).collect();
-    entries.extend(match tile {
-        Some(t) => vec![
-            (322, long, vec![t]),
-            (323, long, vec![t]),
-            (324, long, offsets),
-            (325, long, counts),
-        ],
-        Option::None => vec![
+    entries.extend(match tags.iter().any(|t| t.0 == 322) {
+        true => vec![(324, long, offsets), (325, long, counts)],
+        false => vec![
             (273, long, offsets),
             (278, long, vec![h]),
             (279, long, counts),
         ],
     });
+    entries.extend(tags.iter().cloned());
     if !extra.is_empty() {
         entries.push((338, short, extra.iter().map(|&e| e.into()).collect()));
     }
@@ -521,7 +524,7 @@ fn a_planar_tiff_reads_like_an_interleaved_one() {
         rgba.push(alpha);
         for (planes, extra) in [(rgb, vec![]), (rgba, vec![2])] {
             let n = planes.len() as u16;
-            let tiff = raw_tiff((w, h), bits, n, 2, &extra, &planes, Option::None);
+            let tiff = raw_tiff((w, h), bits, n, 2, &extra, &planes, &[]);
             let read = tiff_texts(tiff);
             assert_eq!(
                 read,
@@ -546,7 +549,15 @@ fn a_tiled_planar_tiff_drops_the_tile_padding() {
     let tiles: Vec<_> = (0..3)
         .flat_map(|_| corners.map(|(x, y)| tile(x, y)))
         .collect();
-    let tiff = raw_tiff((w, h), 8, 3, 2, &[], &tiles, Some(t));
+    let tiff = raw_tiff(
+        (w, h),
+        8,
+        3,
+        2,
+        &[],
+        &tiles,
+        &[(322, 4, vec![t]), (323, 4, vec![t])],
+    );
     assert_eq!(tiff_grey(&tiff), Ok(grey));
 }
 
@@ -563,7 +574,7 @@ fn a_grey_alpha_tiff_reads() {
             1,
             &[extra],
             &[chunky(&[&qr, &opaque], bits)],
-            Option::None,
+            &[],
         );
         let read = tiff_texts(tiff);
         assert_eq!(
@@ -574,15 +585,7 @@ fn a_grey_alpha_tiff_reads() {
     }
     // Transparent black, opaque black and half-covered black, composited over white.
     let (grey, alpha) = ([0, 0, 0], [0, 255, 128]);
-    let tiff = raw_tiff(
-        (3, 1),
-        8,
-        2,
-        1,
-        &[2],
-        &[chunky(&[&grey, &alpha], 8)],
-        Option::None,
-    );
+    let tiff = raw_tiff((3, 1), 8, 2, 1, &[2], &[chunky(&[&grey, &alpha], 8)], &[]);
     assert_eq!(tiff_grey(&tiff), Ok(vec![255, 0, 127]));
 }
 
@@ -592,25 +595,17 @@ fn associated_alpha_is_composited_once() {
     let (colour, alpha) = ([128, 0, 0, 255], [128, 0, 255, 255]);
     for bits in [8, 16] {
         let rgba = chunky(&[&colour, &colour, &colour, &alpha], bits);
-        let tiff = raw_tiff((4, 1), bits, 4, 2, &[1], &[rgba], Option::None);
+        let tiff = raw_tiff((4, 1), bits, 4, 2, &[1], &[rgba], &[]);
         assert_eq!(tiff_grey(&tiff), Ok(vec![255, 255, 0, 255]), "{bits}-bit");
     }
     // Unassociated, the same samples are half-covered grey.
     let rgba = chunky(&[&colour, &colour, &colour, &alpha], 8);
-    let tiff = raw_tiff(
-        (4, 1),
-        8,
-        4,
-        2,
-        &[2],
-        std::slice::from_ref(&rgba),
-        Option::None,
-    );
+    let tiff = raw_tiff((4, 1), 8, 4, 2, &[2], std::slice::from_ref(&rgba), &[]);
     assert_eq!(tiff_grey(&tiff), Ok(vec![191, 255, 0, 255]));
     // An unspecified extra sample isn't alpha, interleaved or planar.
     let planes = [colour, colour, colour, alpha].map(Vec::from);
     for strips in [vec![rgba], planes.to_vec()] {
-        let tiff = raw_tiff((4, 1), 8, 4, 2, &[0], &strips, Option::None);
+        let tiff = raw_tiff((4, 1), 8, 4, 2, &[0], &strips, &[]);
         assert_eq!(tiff_grey(&tiff), Ok(vec![128, 0, 0, 255]));
     }
 }
@@ -625,9 +620,9 @@ fn a_16_bit_or_alpha_cmyk_tiff_reads() {
     );
     let opaque = vec![255; qr.len()];
     let cmyk16 = chunky(&[&none, &none, &none, &ink], 16);
-    let cmyk16 = raw_tiff((w, h), 16, 4, 5, &[], &[cmyk16], Option::None);
+    let cmyk16 = raw_tiff((w, h), 16, 4, 5, &[], &[cmyk16], &[]);
     let cmyka = chunky(&[&none, &none, &none, &ink, &opaque], 8);
-    let cmyka = raw_tiff((w, h), 8, 5, 5, &[2], &[cmyka], Option::None);
+    let cmyka = raw_tiff((w, h), 8, 5, 5, &[2], &[cmyka], &[]);
     for (name, tiff) in [("CMYK 16-bit", cmyk16), ("CMYK + alpha", cmyka)] {
         assert_eq!(
             tiff_texts(tiff),
@@ -787,4 +782,113 @@ fn a_tiff_with_no_readable_page_is_an_error() {
                 && message.starts_with("Can't decode this TIFF file: ")),
         "{cut:?}"
     );
+}
+
+/// Reading `tiff` gives `text`, or a plain "isn't supported" error: never no code, a code the
+/// pixels don't hold, or the decoder's own words.
+fn reads_or_refuses(tiff: Vec<u8>, text: &str) {
+    let (error, texts) = tiff_texts(tiff);
+    let refused = |e: &String| e.contains(" supported") && !e.contains("unsupported error");
+    assert!(
+        error.is_none() && texts == [text]
+            || texts.is_empty() && error.as_ref().is_some_and(refused),
+        "{error:?} {texts:?}"
+    );
+}
+
+#[test]
+#[ignore = "known bug: R3-01"]
+fn a_palette_tiff_reads() {
+    // Index 0 is white and 1 black, so reading the indices as grey would invert the code.
+    let qr = code(QRCode, "palette", "");
+    let (w, h) = qr.dimensions();
+    let colours = [[65535; 3], [0; 3], [65535, 0, 0], [0, 0, 65535]];
+    for bits in [1u8, 2, 4, 8] {
+        let size = 1usize << bits;
+        let map = |c: usize| (0..size).map(move |i| colours.get(i).map_or(0, |v| v[c]));
+        let map: Vec<u32> = (0..3).flat_map(map).collect();
+        let strip = pack(&qr, bits, |v| u8::from(v < 128));
+        let tags = [(320, 3, map)];
+        let tiff = raw_tiff((w, h), bits.into(), 1, 3, &[], &[strip], &tags);
+        assert_eq!(
+            tiff_texts(tiff),
+            (Option::None, vec!["palette".into()]),
+            "{bits}-bit"
+        );
+    }
+    // White, black, red and blue, through Rec. 601.
+    let map = (0..3).flat_map(|c| (0..256).map(move |i| colours.get(i).map_or(0, |v| v[c])));
+    let tiff = raw_tiff(
+        (4, 1),
+        8,
+        1,
+        3,
+        &[],
+        &[vec![0, 1, 2, 3]],
+        &[(320, 3, map.collect())],
+    );
+    assert_eq!(tiff_grey(&tiff), Ok(vec![255, 0, 76, 29]));
+}
+
+#[test]
+#[ignore = "known bug: R3-02"]
+fn a_tiff_filled_from_the_low_bit_reads_or_is_refused() {
+    // FillOrder 2: each byte's bits run from the lowest, as a fax modem sends them.
+    let qr = code(QRCode, "fill order", "");
+    let (w, h) = qr.dimensions();
+    for bits in [1u8, 4] {
+        let strip = pack(&qr, bits, |v| v >> (8 - bits))
+            .iter()
+            .map(|b| b.reverse_bits())
+            .collect();
+        let tiff = raw_tiff(
+            (w, h),
+            bits.into(),
+            1,
+            1,
+            &[],
+            &[strip],
+            &[(266, 3, vec![2])],
+        );
+        reads_or_refuses(tiff, "fill order");
+    }
+}
+
+#[test]
+#[ignore = "known bug: R3-04"]
+fn a_white_is_zero_grey_alpha_tiff_reads_or_is_refused() {
+    let qr = code(QRCode, "white is zero", "");
+    let (w, h) = qr.dimensions();
+    let (ink, opaque) = (
+        qr.iter().map(|v| 255 - v).collect::<Vec<_>>(),
+        vec![255; qr.len()],
+    );
+    for bits in [8, 16] {
+        let strip = chunky(&[&ink, &opaque], bits);
+        reads_or_refuses(
+            raw_tiff((w, h), bits, 2, 0, &[2], &[strip], &[]),
+            "white is zero",
+        );
+    }
+}
+
+#[test]
+#[ignore = "known bug: R3-05"]
+fn premultiplied_cmyk_is_composited_once() {
+    // Premultiplied black ink at full, half and no coverage: over white (no ink) it stays as
+    // stored, so half-covered black is mid grey.
+    let (none, k, alpha) = ([0; 3], [255, 128, 0], [255, 128, 0]);
+    let cmyka = chunky(&[&none, &none, &none, &k, &alpha], 8);
+    let tiff = raw_tiff((3, 1), 8, 5, 5, &[1], &[cmyka], &[]);
+    assert_eq!(tiff_grey(&tiff), Ok(vec![0, 127, 255]));
+}
+
+#[test]
+#[ignore = "known bug: R3-06"]
+fn alpha_after_an_unspecified_extra_sample_is_composited() {
+    // ExtraSamples [0, 2]: the second extra sample is the alpha.
+    let (grey, other, alpha) = ([0; 3], [255, 0, 77], [0, 255, 128]);
+    let pixels = chunky(&[&grey, &other, &alpha], 8);
+    let tiff = raw_tiff((3, 1), 8, 3, 1, &[0, 2], &[pixels], &[]);
+    assert_eq!(tiff_grey(&tiff), Ok(vec![255, 0, 127]));
 }

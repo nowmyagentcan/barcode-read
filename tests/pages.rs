@@ -7,7 +7,7 @@ use barcode_read::decode::Page;
 use barcode_read::error::Warning;
 use barcode_read::input::PageList;
 use barcode_read::{engine, pdf, tiff};
-use common::{pdf_file, read_pages, vector_qr};
+use common::{pdf_file, pdf_objects, read_pages, vector_qr};
 
 const A4: (f32, f32) = (595.0, 842.0);
 
@@ -270,4 +270,100 @@ fn an_aes_pdf_opens_only_with_its_password() {
         texts(&read_pages(&fixture("aes.pdf"), &options)),
         [(1, "secret page")]
     );
+}
+
+#[test]
+#[ignore = "known bug: R3-02"]
+fn a_fax_filled_from_the_low_bit_reads_or_is_refused() {
+    // libtiff's Group 4 page and uncompressed page, both with FillOrder 2.
+    let file = engine::read(
+        "f.tif".into(),
+        fixture("fill-order.tif"),
+        &Options::default(),
+    );
+    let read: Vec<_> = file
+        .codes
+        .iter()
+        .map(|c| (c.page, c.text.as_str()))
+        .collect();
+    let refused = file.error.as_ref().map(|e| e.message.as_str());
+    let refused =
+        refused.is_some_and(|e| e.contains(" supported") && !e.contains("unsupported error"));
+    assert!(
+        read == [(1, "fill order 2"), (2, "fill order 2")] && file.warnings.is_empty() || refused,
+        "{read:?} {:?} {:?}",
+        file.warnings,
+        file.error
+    );
+}
+
+#[test]
+#[ignore = "known bug: R3-03"]
+fn reads_lzw_tiles() {
+    // libtiff's LZW with the horizontal predictor in 16 x 16 tiles.
+    let read = read_pages(&fixture("lzw-tiles.tif"), &Options::default());
+    assert_eq!(texts(&read), [(1, "lzw tiles")]);
+}
+
+fn page(contents: usize) -> String {
+    format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents {contents} 0 R >>")
+}
+
+#[test]
+#[ignore = "known bug: R3-07"]
+fn a_page_whose_content_cant_be_decoded_fails() {
+    // Page 1's content stream claims FlateDecode but isn't; page 2 holds a QR.
+    let (bad, qr) = (
+        "not deflate data",
+        vector_qr("page two", 100.0, 100.0, 3.0, A4.1),
+    );
+    let catalog = "<< /Type /Catalog /Pages 2 0 R >>".to_string();
+    let broken = format!("<< /Filter /FlateDecode /Length 16 >>\nstream\n{bad}\nendstream");
+    let objects = [
+        catalog.clone(),
+        "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>".into(),
+        page(4),
+        broken.clone(),
+        page(6),
+        format!("<< /Length {} >>\nstream\n{qr}\nendstream", qr.len()),
+    ];
+    let read = read_pages(&pdf_objects(&objects, ""), &Options::default());
+    assert_eq!(texts(&read), [(2, "page two")]);
+    let warnings: Vec<_> = read.warnings.iter().map(|w| w.code).collect();
+    assert_eq!(warnings, ["page_failed"]);
+    // With only the broken page the file fails, and so does a batch holding it.
+    let pages = "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into();
+    let one = pdf_objects(&[catalog, pages, page(4), broken], "");
+    let files = [
+        engine::read("ok.pdf".into(), three_pages(), &Options::default()),
+        engine::read("bad.pdf".into(), one, &Options::default()),
+    ];
+    let report = engine::Report::new(&files);
+    assert!(files[1].error.is_some(), "{:?}", files[1].warnings);
+    assert_eq!((report.failed, report.exit_code()), (1, 1));
+}
+
+#[test]
+#[ignore = "known bug: R3-07"]
+fn a_scanned_pdf_cut_short_is_not_read_as_blank() {
+    // The first fifth of the scanned fixture, as an interrupted download leaves it.
+    let mut scan = fixture("scan.pdf");
+    scan.truncate(scan.len() / 5);
+    let file = engine::read("cut.pdf".into(), scan, &Options::default());
+    let failed = file.warnings.iter().any(|w| w.code == "page_failed");
+    assert!(file.error.is_some() || failed, "{:?}", file.warnings);
+}
+
+#[test]
+#[ignore = "known bug: R3-08"]
+fn a_pdf_with_no_pages_is_an_error() {
+    let catalog = "<< /Type /Catalog /Pages 2 0 R >>".to_string();
+    let missing = pdf_objects(
+        &[catalog, "<< /Type /Pages /Kids [9 0 R] /Count 1 >>".into()],
+        "",
+    );
+    for (name, pdf) in [("no pages", pdf_file(&[], "")), ("missing page", missing)] {
+        let file = engine::read("test.pdf".into(), pdf, &Options::default());
+        assert!(file.error.is_some(), "{name}: {:?}", file.warnings);
+    }
 }

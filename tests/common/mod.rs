@@ -122,6 +122,12 @@ pub fn pdf_file(pages: &[(f32, f32, String)], trailer: &str) -> Vec<u8> {
             ops.len() + 1
         ));
     }
+    pdf_objects(&objects, trailer)
+}
+
+/// A PDF of `objects`, numbered from 1 (the first is the catalog), with `trailer` added to its
+/// trailer dictionary.
+pub fn pdf_objects(objects: &[String], trailer: &str) -> Vec<u8> {
     let mut out = String::from("%PDF-1.4\n");
     let mut offsets = vec![];
     for (i, object) in objects.iter().enumerate() {

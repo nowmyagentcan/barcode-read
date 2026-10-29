@@ -1,7 +1,7 @@
 #!/bin/sh
-# Rebuilds the files in this folder from QR codes drawn by zint: a plain QR PNG, fax TIFFs, a
-# scanned PDF with one page per image codec, and an AES-256 encrypted PDF. The tools only run
-# here; none ships.
+# Rebuilds the files in this folder from QR codes drawn by zint: a plain QR PNG, fax and other
+# libtiff TIFFs, a scanned PDF with one page per image codec, and an AES-256 encrypted PDF. The
+# tools only run here; none ships.
 # Needs (Debian or Ubuntu): zint libtiff-tools img2pdf jbig2 libopenjp2-tools qpdf
 # libjpeg-turbo-progs python3
 set -eu
@@ -46,6 +46,17 @@ draw g4 "group 4"
 ppm2tiff -c g3 -r 240 g3.pbm g3.tif
 ppm2tiff -c g4 -r 240 g4.pbm g4.tif
 tiffcp g3.tif g4.tif "$out/fax-g3.tif"
+
+# Layouts libtiff writes: LZW tiles with a predictor, and a Group 4 page and an uncompressed
+# page whose bits run from the low bit of each byte (FillOrder 2).
+draw lzw "lzw tiles"
+ppm2tiff lzw.pgm lzw.tif
+tiffcp -c lzw:2 -t -w 16 -l 16 lzw.tif "$out/lzw-tiles.tif"
+draw fill "fill order 2"
+ppm2tiff -c g4 -r 240 fill.pbm fill.tif
+tiffcp -f lsb2msb -c g4 fill.tif fill-g4.tif
+tiffcp -f lsb2msb -c none fill.tif fill-raw.tif
+tiffcp fill-g4.tif fill-raw.tif "$out/fill-order.tif"
 
 # One scanned page per image codec, each QR holding its filter's name.
 for codec in DCTDecode FlateDecode CCITTFaxDecode JBIG2Decode JPXDecode; do draw "$codec" "$codec"; done
