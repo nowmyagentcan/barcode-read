@@ -97,7 +97,6 @@ fn a_page_too_large_to_render_leaves_the_others() {
 }
 
 #[test]
-#[ignore = "known bug: R2-04"]
 fn a_pdf_with_no_page_rendered_is_an_error() {
     let huge = (HUGE.0, HUGE.1, String::new());
     let pdf = pdf_file(&[huge.clone(), huge], "");

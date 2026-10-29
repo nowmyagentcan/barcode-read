@@ -21,7 +21,8 @@ const MAX_SIDE: u64 = 65_535;
 
 /// Renders the selected pages (`options.pages`) in order at `options.dpi`, or at the highest
 /// whole DPI that fits the page limits (with a warning), and hands each to `each` before
-/// rendering the next. An encrypted file opens with `options.password`.
+/// rendering the next. An encrypted file opens with `options.password`. When no selected page
+/// renders, the file fails.
 pub fn pages(
     bytes: Vec<u8>,
     options: &Options,
@@ -40,22 +41,33 @@ pub fn pages(
     })?;
     let cache = RenderCache::new();
     let all = pdf.pages();
+    let (mut rendered, mut failed) = (false, false);
     for number in select(options.pages.as_ref(), all.len(), warnings)? {
         let page = &all[number - 1];
         let Some(dpi) = fit(options.dpi, page.render_dimensions()) else {
             warnings.push(Warning::page_failed(number, "it is too large to render"));
+            failed = true;
             continue;
         };
         if dpi < options.dpi {
             warnings.push(Warning::dpi_reduced(number, options.dpi, dpi));
         }
         match catch_unwind(AssertUnwindSafe(|| grey(page, &cache, dpi))) {
-            Ok(grey) => each(Page {
-                dpi: Some(dpi),
-                ..Page::new(number, grey)
-            }),
-            Err(panic) => warnings.push(Warning::page_failed(number, panic_message(&*panic))),
+            Ok(grey) => {
+                rendered = true;
+                each(Page {
+                    dpi: Some(dpi),
+                    ..Page::new(number, grey)
+                });
+            }
+            Err(panic) => {
+                warnings.push(Warning::page_failed(number, panic_message(&*panic)));
+                failed = true;
+            }
         }
+    }
+    if failed && !rendered {
+        return Err(Error::corrupt_pdf("no page could be rendered"));
     }
     Ok(())
 }
