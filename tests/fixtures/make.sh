@@ -1,6 +1,7 @@
 #!/bin/sh
-# Rebuilds the files in this folder from QR codes drawn by zint: fax TIFFs, a scanned PDF with
-# one page per image codec, and an AES-256 encrypted PDF. The tools only run here; none ships.
+# Rebuilds the files in this folder from QR codes drawn by zint: a plain QR PNG, fax TIFFs, a
+# scanned PDF with one page per image codec, and an AES-256 encrypted PDF. The tools only run
+# here; none ships.
 # Needs (Debian or Ubuntu): zint libtiff-tools img2pdf jbig2 libopenjp2-tools qpdf
 # libjpeg-turbo-progs python3
 set -eu
@@ -85,5 +86,8 @@ qpdf --empty --pages 1.pdf 2.pdf 3.pdf 4.pdf 5.pdf -- "$out/scan.pdf"
 draw secret "secret page"
 img2pdf secret.pgm -o secret.pdf
 qpdf --encrypt --user-password=open-sesame --owner-password=owner --bits=256 -- secret.pdf "$out/aes.pdf"
+
+# A 132 x 132 px QR (4 px per module, quiet zone included) for the release smoke test.
+zint -b QRCODE -d "barcode-read smoke test" --quietzones --scale 2 -o "$out/qr.png"
 
 ls -l "$out"

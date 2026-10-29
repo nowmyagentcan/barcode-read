@@ -93,6 +93,10 @@ jobs:
       run:
         shell: bash
     steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: tests/fixtures/qr.png
+          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v8
         with:
           name: dist
@@ -116,6 +120,7 @@ jobs:
           esac
           test -s LICENSE && test -s THIRD-PARTY-LICENSES.txt
           ./barcode-read --version | grep -x 'barcode-read [0-9.]*'
+          ./barcode-read ../tests/fixtures/qr.png --json | grep -F '"text":"barcode-read smoke test"'
       - name: Copy the files with wrong checksums
         run: mkdir bad && cp dist/* bad/ && sed -i.bak 's/^./x/' bad/SHA256SUMS
       # The installers are tested here, on throwaway runners, because they edit the user's PATH.
@@ -157,6 +162,13 @@ jobs:
           }
           # A new shell finds it through the user PATH alone.
           powershell -NoProfile -Command '$env:Path = [Environment]::GetEnvironmentVariable(''Path'', ''User''); barcode-read --version'
+          # An upgrade works while the page server runs, and the next one clears the moved copy.
+          $p = Start-Process "$dir\barcode-read.exe" 'ui --no-open' -PassThru -WindowStyle Hidden
+          Start-Sleep 1
+          if ($p.HasExited) { throw 'barcode-read ui stopped' }
+          powershell -NoProfile -File dist/install.ps1
+          if ($LASTEXITCODE) { throw 'upgrade failed while barcode-read ui ran' }
+          Stop-Process $p.Id; $p.WaitForExit()
           # Other files in the folder stay.
           Set-Content "$dir\notes.old" 'kept'
           powershell -NoProfile -File dist/install.ps1
