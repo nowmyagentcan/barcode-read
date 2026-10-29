@@ -6,7 +6,7 @@ use barcode_read::Options;
 use barcode_read::decode::Page;
 use barcode_read::error::Warning;
 use barcode_read::input::PageList;
-use barcode_read::{pdf, tiff};
+use barcode_read::{engine, pdf, tiff};
 use common::{pdf_file, read_pages, vector_qr};
 
 const A4: (f32, f32) = (595.0, 842.0);
@@ -75,6 +75,43 @@ fn reads_an_a0_page_at_a_reduced_dpi() {
             message: "Page 1 is too large for 300 dpi, so it was read at 160 dpi.".into()
         }]
     );
+}
+
+/// A page too large to render at any DPI: a billion points square.
+const HUGE: (f32, f32) = (1e9, 1e9);
+
+#[test]
+fn a_page_too_large_to_render_leaves_the_others() {
+    let huge = (HUGE.0, HUGE.1, String::new());
+    let qr = (A4.0, A4.1, vector_qr("page two", 100.0, 100.0, 3.0, A4.1));
+    let read = read_pages(&pdf_file(&[huge, qr], ""), &Options::default());
+    assert_eq!(read.pages.iter().map(|p| p.0).collect::<Vec<_>>(), [2]);
+    assert_eq!(read.codes[0].text, "page two");
+    assert_eq!(
+        read.warnings,
+        [Warning {
+            code: "page_failed",
+            message: "Page 1 couldn't be read: it is too large to render.".into()
+        }]
+    );
+}
+
+#[test]
+#[ignore = "known bug: R2-04"]
+fn a_pdf_with_no_page_rendered_is_an_error() {
+    let huge = (HUGE.0, HUGE.1, String::new());
+    let pdf = pdf_file(&[huge.clone(), huge], "");
+    let qr = pdf_file(
+        &[(A4.0, A4.1, vector_qr("ok", 100.0, 100.0, 3.0, A4.1))],
+        "",
+    );
+    let files = [
+        engine::read("ok.pdf".into(), qr, &Options::default()),
+        engine::read("huge.pdf".into(), pdf, &Options::default()),
+    ];
+    let report = engine::Report::new(&files);
+    assert!(files[1].error.is_some(), "{:?}", files[1].warnings);
+    assert_eq!((report.failed, report.exit_code()), (1, 1));
 }
 
 fn with_pages(list: &str) -> Options {
