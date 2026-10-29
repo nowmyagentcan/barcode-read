@@ -133,6 +133,13 @@ impl Cli {
 fn main() -> ExitCode {
     let mut args: Vec<OsString> = std::env::args_os().collect();
     let bare = args.len() == 1;
+    if bare && double_clicked() {
+        let stop = format!(
+            " {} close this window to stop.",
+            Look::stdout().pick("·", "-")
+        );
+        return served(ui::serve(0, true, &stop));
+    }
     // Only an exact first argument is a command: `./read` is a file.
     match args.get(1).and_then(|a| a.to_str()) {
         Some("read") => drop(args.remove(1)),
@@ -231,6 +238,21 @@ fn read(
     }
     out.w.flush()?;
     Ok(report.exit_code())
+}
+
+/// Whether Explorer started this process: it then has a console to itself, while a terminal
+/// shares its console with the shell.
+#[cfg(windows)]
+fn double_clicked() -> bool {
+    use windows_sys::Win32::System::Console::GetConsoleProcessList;
+    let mut ids = [0u32; 2];
+    // SAFETY: the call writes at most `ids.len()` process ids into `ids`.
+    unsafe { GetConsoleProcessList(ids.as_mut_ptr(), ids.len() as u32) == 1 }
+}
+
+#[cfg(not(windows))]
+fn double_clicked() -> bool {
+    false
 }
 
 /// How a server command ended: quietly, or with its error on stderr.
