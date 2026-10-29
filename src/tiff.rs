@@ -93,9 +93,9 @@ fn page(tiff: &mut Tiff, number: usize) -> Result<Page, String> {
         }
         // Bilevel and other packed grey: the tiff crate has already turned WhiteIsZero around.
         (ColorType::Gray(bits @ (1 | 2 | 4)), DecodingResult::U8(v)) => {
-            let max = (1 << bits) - 1;
-            let samples =
-                unpack(&v, bits, w, h).map(|s| s.into_iter().map(|s| s * 255 / max).collect());
+            // 255 is a multiple of 1, 3 and 15, so each level maps exactly and never overflows.
+            let step = 255 / ((1 << bits) - 1);
+            let samples = unpack(&v, bits, w, h).map(|s| s.into_iter().map(|s| s * step).collect());
             samples
                 .and_then(|s| GrayImage::from_raw(w, h, s))
                 .map(DynamicImage::ImageLuma8)

@@ -426,7 +426,6 @@ fn packed_tiff(img: &GrayImage, bits: u8, level: impl Fn(u8) -> u8) -> Vec<u8> {
 }
 
 #[test]
-#[ignore = "known bug: QA-01"]
 fn packed_grey_tiff_keeps_every_level() {
     for bits in [2, 4] {
         let max = (1u8 << bits) - 1;
