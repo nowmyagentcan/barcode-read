@@ -16,8 +16,9 @@ use crate::raster::{check_size, to_grey};
 type Tiff<'a> = Decoder<Cursor<&'a [u8]>>;
 
 /// Reads the selected pages (`options.pages`) in order and hands each to `each`. A page that
-/// can't be decoded becomes a `page_failed` warning and the others still read; only an
-/// unreadable first directory fails the file, and a broken later one ends it.
+/// can't be decoded becomes a `page_failed` warning and the others still read. An unreadable
+/// first directory fails the file, a broken later one ends it, and so does the first page's
+/// error when no selected page could be read.
 pub fn pages(
     bytes: &[u8],
     options: &Options,
@@ -38,22 +39,36 @@ pub fn pages(
         }
         count += 1;
     }
+    let (mut read, mut failed) = (false, None);
     for number in select(options.pages.as_ref(), count, warnings)? {
-        let page = tiff.seek_to_image(number - 1).map_err(reason);
+        let page = tiff.seek_to_image(number - 1).map_err(unreadable);
         match page.and_then(|()| self::page(&mut tiff, number)) {
-            Ok(page) => each(page),
-            Err(reason) => warnings.push(Warning::page_failed(number, reason)),
+            Ok(page) => {
+                read = true;
+                each(page);
+            }
+            Err(e) => {
+                warnings.push(Warning::page_failed(number, &e.message));
+                failed.get_or_insert(e);
+            }
         }
     }
-    Ok(())
+    match failed {
+        Some(e) if !read && e.code == "corrupt_image" => {
+            Err(Error::corrupt_image("TIFF", e.message))
+        }
+        Some(e) if !read => Err(e),
+        _ => Ok(()),
+    }
 }
 
-fn page(tiff: &mut Tiff, number: usize) -> Result<Page, String> {
-    let (w, h) = tiff.dimensions().map_err(reason)?;
-    check_size(w.into(), h.into()).map_err(|e| e.message)?;
+/// The page, or why not: `image_too_large`, or `corrupt_image` holding the bare reason.
+fn page(tiff: &mut Tiff, number: usize) -> Result<Page, Error> {
+    let (w, h) = tiff.dimensions().map_err(unreadable)?;
+    check_size(w.into(), h.into())?;
     let orientation = tiff.find_tag_unsigned(Tag::Orientation).ok().flatten();
-    let color = tiff.colortype().map_err(reason)?;
-    let pixels = tiff.read_image().map_err(reason)?;
+    let color = tiff.colortype().map_err(unreadable)?;
+    let pixels = tiff.read_image().map_err(unreadable)?;
     let img = match (color, pixels) {
         (ColorType::Gray(8), DecodingResult::U8(v)) => {
             GrayImage::from_raw(w, h, v).map(DynamicImage::ImageLuma8)
@@ -101,7 +116,7 @@ fn page(tiff: &mut Tiff, number: usize) -> Result<Page, String> {
                 .map(DynamicImage::ImageLuma8)
         }
         (ColorType::Palette(bits @ (1 | 2 | 4 | 8)), DecodingResult::U8(v)) => {
-            let map = tiff.get_tag_u16_vec(Tag::ColorMap).map_err(reason)?;
+            let map = tiff.get_tag_u16_vec(Tag::ColorMap).map_err(unreadable)?;
             let size = 1 << bits;
             let colour = |i: u8, c: usize| {
                 map.get(c * size + usize::from(i))
@@ -115,9 +130,9 @@ fn page(tiff: &mut Tiff, number: usize) -> Result<Page, String> {
             rgb.and_then(|rgb| RgbImage::from_raw(w, h, rgb))
                 .map(DynamicImage::ImageRgb8)
         }
-        (color, _) => return Err(format!("{color:?} pixels aren't supported")),
+        (color, _) => return Err(bad(format!("{color:?} pixels aren't supported"))),
     };
-    let grey = to_grey(img.ok_or("its pixel data is cut short")?);
+    let grey = to_grey(img.ok_or_else(|| bad("its pixel data is cut short".into()))?);
     Ok(Page {
         orientation: orientation
             .and_then(Orientation::from_exif)
@@ -136,6 +151,14 @@ fn unpack(data: &[u8], bits: u8, w: u32, h: u32) -> Option<Vec<u8>> {
         rows.flat_map(|r| (0..w).map(move |x| r[x * bits / 8] >> (8 - bits - x * bits % 8) & mask))
             .collect(),
     )
+}
+
+fn bad(reason: String) -> Error {
+    Error::new("corrupt_image", reason, None)
+}
+
+fn unreadable(e: TiffError) -> Error {
+    bad(reason(e))
 }
 
 fn reason(e: TiffError) -> String {

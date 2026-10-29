@@ -554,12 +554,26 @@ fn an_unknown_eci_payload_keeps_an_escaped_text() {
 }
 
 #[test]
-#[ignore = "known bug: QA-11"]
 fn a_tiff_with_no_readable_page_is_an_error() {
-    let mut tiff = packed_tiff(&GrayImage::new(1, 1), 1, |v| v >> 7);
-    // The first directory entry is the width.
+    let tiff = packed_tiff(&GrayImage::new(1, 1), 1, |v| v >> 7);
+    // Directory entries are 12 bytes from offset 2, each with its value at 8.
     let ifd = u32::from_le_bytes(tiff[4..8].try_into().unwrap()) as usize;
-    tiff[ifd + 10..ifd + 14].copy_from_slice(&70_000u32.to_le_bytes());
-    let file = engine::read("wide.tif".into(), tiff, &Options::default());
-    assert_eq!(file.error.map(|e| e.code), Some("image_too_large"));
+    let with = |entry: usize, value: u32| {
+        let mut tiff = tiff.clone();
+        let at = ifd + 2 + 12 * entry + 8;
+        tiff[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        tiff
+    };
+    // Too wide; then a strip that starts past the end of the file.
+    let (wide, cut) = (with(0, 70_000), with(5, 1 << 20));
+    let wide = engine::read("wide.tif".into(), wide, &Options::default()).error;
+    assert_eq!(wide.map(|e| e.code), Some("image_too_large"));
+    let cut = engine::read("cut.tif".into(), cut, &Options::default()).error;
+    let cut = cut.map(|e| (e.code, e.message));
+    assert!(
+        cut.as_ref()
+            .is_some_and(|(code, message)| *code == "corrupt_image"
+                && message.starts_with("Can't decode this TIFF file: ")),
+        "{cut:?}"
+    );
 }
