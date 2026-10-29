@@ -26,7 +26,7 @@ pub fn bytes_code(format: BarcodeFormat, bytes: &[u8]) -> GrayImage {
     image(zxingcpp::create(format).from_slice(bytes).unwrap())
 }
 
-fn image(code: Barcode) -> GrayImage {
+pub fn image(code: Barcode) -> GrayImage {
     let img = code.to_image_with(&zxingcpp::write().scale(4)).unwrap();
     GrayImage::from_vec(img.width() as u32, img.height() as u32, img.data()).unwrap()
 }

@@ -5,7 +5,7 @@ mod common;
 
 use barcode_read::Options;
 use barcode_read::decode::{Page, find_codes};
-use barcode_read::{input::Kind, raster};
+use barcode_read::{engine, input::Kind, raster};
 use base64::prelude::{BASE64_STANDARD, Engine};
 use common::{bytes_code, code, encode, read, texts, with_exif};
 use image::codecs::{jpeg::JpegEncoder, png::PngEncoder, webp::WebPEncoder};
@@ -380,4 +380,161 @@ fn animated_webp(stills: &[Vec<u8>]) -> Vec<u8> {
         body.extend(chunk(b"ANMF", &frame));
     }
     chunk(b"RIFF", &body)
+}
+
+/// An uncompressed one-strip TIFF of `bits`-bit grey samples (0 is black), each row padded to
+/// a byte; `level` gives the sample for a pixel of `img`.
+fn packed_tiff(img: &GrayImage, bits: u8, level: impl Fn(u8) -> u8) -> Vec<u8> {
+    let mut strip = vec![];
+    for row in img.rows() {
+        let (mut byte, mut used) = (0, 0);
+        for p in row {
+            byte |= level(p[0]) << (8 - bits - used);
+            used += bits;
+            if used == 8 {
+                strip.push(byte);
+                (byte, used) = (0, 0);
+            }
+        }
+        if used > 0 {
+            strip.push(byte);
+        }
+    }
+    let ifd = 8 + strip.len().next_multiple_of(2) as u32;
+    let mut out = [b"II*\0".as_slice(), &ifd.to_le_bytes(), &strip].concat();
+    out.resize(ifd as usize, 0);
+    let (w, h) = img.dimensions();
+    let (long, short) = (4, 3);
+    let entries: [(u16, u16, u32); 9] = [
+        (256, long, w),
+        (257, long, h),
+        (258, short, bits.into()),
+        (259, short, 1),
+        (262, short, 1),
+        (273, long, 8),
+        (277, short, 1),
+        (278, long, h),
+        (279, long, strip.len() as u32),
+    ];
+    out.extend((entries.len() as u16).to_le_bytes());
+    for (tag, kind, value) in entries {
+        out.extend([tag.to_le_bytes(), kind.to_le_bytes()].concat());
+        out.extend([1u32.to_le_bytes(), value.to_le_bytes()].concat());
+    }
+    out.extend(0u32.to_le_bytes());
+    out
+}
+
+#[test]
+#[ignore = "known bug: QA-01"]
+fn packed_grey_tiff_keeps_every_level() {
+    for bits in [2, 4] {
+        let max = (1u8 << bits) - 1;
+        let levels = GrayImage::from_fn(u32::from(max) + 1, 1, |x, _| Luma([x as u8]));
+        let mut grey = vec![];
+        let tiff = packed_tiff(&levels, bits, |v| v);
+        barcode_read::tiff::pages(&tiff, &Options::default(), &mut vec![], |p| {
+            grey = p.grey.into_raw()
+        })
+        .unwrap();
+        let want: Vec<_> = (0..=max)
+            .map(|s| (u32::from(s) * 255 / u32::from(max)) as u8)
+            .collect();
+        assert_eq!(grey, want, "{bits}-bit");
+    }
+    // One white column more makes the width odd, so rows end inside a byte.
+    let qr = code(QRCode, "packed grey", "");
+    let img = canvas(qr.width() + 1, qr.height(), &[(&qr, 0, 0)]);
+    for (bits, dark, light) in [(2, 2, 3), (4, 0, 15), (4, 8, 15)] {
+        let tiff = packed_tiff(&img, bits, |v| if v < 128 { dark } else { light });
+        let read = common::read_pages(&tiff, &Options::default());
+        let texts: Vec<_> = read.codes.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            ["packed grey"],
+            "{bits}-bit, levels {dark} and {light}"
+        );
+    }
+}
+
+#[test]
+fn a_tiff_directory_that_points_to_itself_ends() {
+    let mut tiff = packed_tiff(&code(QRCode, "one page", ""), 1, |v| v >> 7);
+    let first = tiff[4..8].to_vec();
+    let end = tiff.len();
+    tiff[end - 4..].copy_from_slice(&first);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let file = engine::read("cycle.tif".into(), tiff, &Options::default());
+        let texts: Vec<_> = file.codes.into_iter().map(|c| c.text).collect();
+        tx.send((file.error.map(|e| e.code), texts)).unwrap();
+    });
+    let read = rx.recv_timeout(std::time::Duration::from_secs(5));
+    assert_eq!(read, Ok((Some("corrupt_image"), vec![])));
+}
+
+#[test]
+fn a_cut_short_image_is_corrupt_image() {
+    let grey = code(QRCode, "cut short", "");
+    // GIF has no grey encoder.
+    let rgb = image::DynamicImage::from(grey.clone()).to_rgb8();
+    let formats = [
+        ImageFormat::Png,
+        ImageFormat::Gif,
+        ImageFormat::Bmp,
+        ImageFormat::WebP,
+    ];
+    let files = formats.map(|f| (format!("{f:?}"), encode(rgb.clone(), f)));
+    for (name, mut bytes) in files.into_iter().chain([("PGM".into(), pgm(&grey))]) {
+        bytes.truncate(bytes.len() / 2);
+        let file = engine::read("cut".into(), bytes, &Options::default());
+        assert_eq!(file.error.map(|e| e.code), Some("corrupt_image"), "{name}");
+    }
+}
+
+#[test]
+#[ignore = "known bug: QA-04"]
+fn a_cut_short_jpeg_is_corrupt_image() {
+    let jpeg = encode(code(QRCode, "cut short", ""), ImageFormat::Jpeg);
+    for percent in [10, 50, 90] {
+        let bytes = jpeg[..jpeg.len() * percent / 100].to_vec();
+        let file = engine::read("cut.jpg".into(), bytes, &Options::default());
+        assert_eq!(
+            file.error.map(|e| e.code),
+            Some("corrupt_image"),
+            "{percent}%"
+        );
+    }
+}
+
+#[test]
+fn a_gif_frame_larger_than_its_canvas_is_refused() {
+    // A 1x1 screen holding a 60000x60000 frame.
+    let gif = b"GIF89a\x01\0\x01\0\x80\0\0\0\0\0\xFF\xFF\xFF,\0\0\0\0\x60\xEA\x60\xEA\0\x02\x02\x44\x01\0;";
+    let file = engine::read("giant.gif".into(), gif.to_vec(), &Options::default());
+    let code = file.error.map(|e| e.code);
+    assert!(
+        matches!(code, Some("image_too_large" | "corrupt_image")),
+        "{code:?}"
+    );
+}
+
+#[test]
+#[ignore = "known bug: QA-05"]
+fn an_unknown_eci_payload_keeps_an_escaped_text() {
+    let payload = b"\0\xFFQA\x1B[31m";
+    let qr = zxingcpp::create(QRCode)
+        .options(r#"{"eci":"999999"}"#)
+        .from_slice(payload)
+        .unwrap();
+    let found = read(&png(&common::image(qr)), &Options::default());
+    let c = &found.codes[0];
+    assert_eq!(c.content, "unknown_eci");
+    let raw = BASE64_STANDARD.decode(c.bytes_base64.as_ref().unwrap());
+    assert_eq!(raw.unwrap(), payload);
+    assert!(
+        c.text.starts_with("<NUL>") && c.text.contains("QA<ESC>[31m"),
+        "{:?}",
+        c.text
+    );
 }
