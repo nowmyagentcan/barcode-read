@@ -2,6 +2,8 @@
 
 Read QR codes and barcodes from photos, scans and PDFs: a command line tool with JSON output, a local web page, and an MCP server for AI agents. Everything runs on your computer.
 
+![The local page after reading a QR label and a Data Matrix code](.github/screenshot.png)
+
 ## Install
 
 Windows (PowerShell, no admin; installs to `%LOCALAPPDATA%\Programs\barcode-read` and adds it to your user PATH):
@@ -67,7 +69,9 @@ barcode-read invoice.pdf --pages 1 --json
 {"files":[{"path":"label.png","type":"png","pages":[{"page":1,"width":132,"height":132}],"barcodes":[{"page":1,"format":"QR Code","text":"barcode-read smoke test","content":"text","bytes_base64":null,"symbology_id":"]Q1","position":[[16,16],[116,16],[116,116],[16,116]],"rotation":0,"ec_level":"M","version":"2","sequence":null}],"warnings":[],"error":null}],"found":1,"failed":0}
 ```
 
-Or add the local MCP server (stdio, one tool `read_barcodes` taking file and folder paths):
+Each file error is `files[].error.code`: `not_found`, `wildcard`, `unreadable`, `empty_file`, `too_large`, `unsupported_format`, `image_too_large`, `corrupt_image`, `corrupt_pdf`, `pdf_password`, `pdf_wrong_password`, `pdf_encryption`, `no_pages` or `internal`. Warnings in `files[].warnings[].code` are `none_found`, `dpi_reduced`, `pages_missing`, `page_failed` and `first_frame_only`. Options: `--formats`, `--pages 1-3,7,10-`, `--dpi 72..1200`, `--password`, `--fast`, `-r`.
+
+Or add the local MCP server (stdio, one tool `read_barcodes`; arguments `paths` (files or folders, absolute is safest), and optionally `formats` (an array of names), `pages`, `dpi`, `password`, `fast`, `recursive`, as the CLI options):
 
 | Agent | Setup |
 |---|---|
@@ -88,6 +92,13 @@ The tool returns the CLI's `--json` object as `structuredContent` and as text. A
 - **Hard pictures:** when the first pass finds nothing, a second pass binarizes the whole image differently and, for images up to 1000 pixels, a third reads it at twice the size. `--fast` runs one pass.
 - **Not read:** HEIC, AVIF, JPEG XL, JPEG 2000 and SVG (each gets its own error and a hint); TIFF pages in Group 3 fax, CCITT 1D or old-style JPEG compression, with floating-point samples, or WhiteIsZero grey with an alpha sample (the page fails, others still read); camera or screen capture, URLs. Structured-append parts are reported with their sequence number, not merged. It doesn't write barcodes.
 - It makes no network requests; `ui` only listens on `127.0.0.1`.
+
+Known limitations in v0.1.0:
+
+- A very noisy photo of 40 megapixels or more can take 5-7 seconds and about 260 MB of memory when nothing narrows the search (a clean one takes under a second). Naming the format, such as `--formats qrcode`, reads it in under a second; `--fast` may miss the code.
+- When every page of a PDF is too large to render, the error hint says the file may be damaged; the warnings before it name the real cause.
+- The page shows some hints written for the CLI, such as `--dpi 600` or `--password`; on the page, use the DPI and PDF password fields under Options.
+- `barcode-read ui --help` and `mcp --help` print their usage line without the `barcode-read` prefix.
 
 ## How it works
 
