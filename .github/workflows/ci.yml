@@ -24,7 +24,7 @@ jobs:
       - run: cargo test --locked
       - name: A double-clicked exe opens the page (opens the runner's browser)
         if: runner.os == 'Windows'
-        run: cargo test --locked --test ui -- --ignored
+        run: cargo test --locked --test ui -- --ignored --exact a_double_click_starts_the_page
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo fmt --check
   licenses:
