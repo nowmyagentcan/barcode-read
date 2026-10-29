@@ -1,9 +1,131 @@
-//! What kind of file an input is, from its first bytes (never from its name).
+//! The files to read: paths and folders expanded in order, their bytes loaded within the size
+//! limit, and what kind of file each is, from its first bytes (never from its name).
+
+use std::fs::{self, File};
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Unsupported, Warning};
 
 /// How many leading bytes `sniff` looks at.
 pub const HEAD: usize = 1024;
+
+/// The largest file read, stdin included.
+const MAX_FILE: u64 = 1 << 30;
+
+/// The extensions a folder is read for; files named explicitly are read whatever their name.
+const EXTENSIONS: [&str; 15] = [
+    "png", "jpg", "jpeg", "jpe", "jfif", "gif", "bmp", "webp", "tif", "tiff", "pbm", "pgm", "ppm",
+    "pnm", "pdf",
+];
+
+/// One file to read: its path as given (folder entries joined to the folder, stdin as `-`) and
+/// where its bytes come from.
+#[derive(Debug)]
+pub struct Input {
+    pub name: String,
+    source: Source,
+}
+
+#[derive(Debug)]
+enum Source {
+    File(PathBuf),
+    Stdin,
+    /// A folder that couldn't be listed.
+    Failed(Error),
+}
+
+/// The files `paths` name, in order: `-` is stdin, a folder gives its files with a readable
+/// extension sorted by name, skipping hidden ones, and with `recursive` its subfolders in
+/// place (depth-first; symlinked folders are not followed). A path given twice is read twice.
+pub fn expand(paths: &[PathBuf], recursive: bool) -> Vec<Input> {
+    let mut inputs = vec![];
+    for path in paths {
+        if path.as_os_str() == "-" {
+            inputs.push(Input::new(path, Source::Stdin));
+        } else if path.is_dir() {
+            folder(path, recursive, &mut inputs);
+        } else {
+            inputs.push(Input::new(path, Source::File(path.clone())));
+        }
+    }
+    inputs
+}
+
+fn folder(dir: &Path, recursive: bool, inputs: &mut Vec<Input>) {
+    let entries = fs::read_dir(dir).and_then(|list| list.collect::<io::Result<Vec<_>>>());
+    let mut entries = match entries {
+        Ok(entries) => entries,
+        Err(e) => {
+            let name = dir.to_string_lossy();
+            let error = Error::unreadable(&name, e);
+            return inputs.push(Input::new(dir, Source::Failed(error)));
+        }
+    };
+    entries.sort_by(|a, b| {
+        let name = |e: &fs::DirEntry| e.file_name().into_encoded_bytes();
+        name(a).cmp(&name(b))
+    });
+    for entry in entries {
+        let path = entry.path();
+        if entry.file_name().as_encoded_bytes().starts_with(b".") {
+            continue;
+        }
+        // A symlink is followed to a file, never to a folder.
+        let is_link = entry.file_type().is_ok_and(|t| t.is_symlink());
+        if path.is_dir() {
+            if recursive && !is_link {
+                folder(&path, recursive, inputs);
+            }
+        } else if path
+            .extension()
+            .is_some_and(|ext| EXTENSIONS.iter().any(|e| ext.eq_ignore_ascii_case(e)))
+        {
+            inputs.push(Input::new(&path, Source::File(path.clone())));
+        }
+    }
+}
+
+impl Input {
+    fn new(path: &Path, source: Source) -> Self {
+        Self {
+            name: path.to_string_lossy().into_owned(),
+            source,
+        }
+    }
+
+    /// The whole file, refused before reading when it is over 1 GiB.
+    pub fn load(&self) -> Result<Vec<u8>, Error> {
+        let name = self.name.as_str();
+        let unreadable = |e| Error::unreadable(name, e);
+        let (reader, size): (Box<dyn Read>, u64) = match &self.source {
+            Source::Failed(e) => return Err(e.clone()),
+            Source::Stdin => (Box::new(io::stdin().lock()), 0),
+            Source::File(path) => {
+                let file = File::open(path).map_err(|e| match e.kind() {
+                    _ if fs::metadata(path).is_ok() => unreadable(e),
+                    _ if name.contains(['*', '?']) => Error::wildcard(name),
+                    io::ErrorKind::NotFound => Error::not_found(name),
+                    _ => unreadable(e),
+                })?;
+                let size = file.metadata().map_err(unreadable)?.len();
+                if size > MAX_FILE {
+                    return Err(Error::too_large());
+                }
+                (Box::new(file), size)
+            }
+        };
+        let mut bytes = Vec::with_capacity(size as usize);
+        reader
+            .take(MAX_FILE + 1)
+            .read_to_end(&mut bytes)
+            .map_err(unreadable)?;
+        if bytes.len() as u64 > MAX_FILE {
+            return Err(Error::too_large());
+        }
+        Ok(bytes)
+    }
+}
 
 /// A readable input type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,6 +282,74 @@ pub fn select(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fresh folder holding empty files at `files` (subfolders made as needed).
+    fn tree(test: &str, files: &[&str]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("barcode-read-{test}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for file in files {
+            let path = root.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            File::create(path).unwrap();
+        }
+        root
+    }
+
+    fn names(inputs: &[Input], root: &Path) -> Vec<String> {
+        let root = root.to_string_lossy();
+        let rel = |i: &Input| i.name[root.len() + 1..].replace('\\', "/");
+        inputs.iter().map(rel).collect()
+    }
+
+    #[test]
+    fn a_folder_gives_its_images_in_name_order() {
+        let files = [
+            "b.PNG",
+            "a.pdf",
+            "B.jpg",
+            "notes.txt",
+            ".hidden.png",
+            "sub/c.png",
+            "sub/.d/e.png",
+            "x.tiff",
+        ];
+        let root = tree("folder", &files);
+        let dir = std::slice::from_ref(&root);
+        let flat = expand(dir, false);
+        assert_eq!(names(&flat, &root), ["B.jpg", "a.pdf", "b.PNG", "x.tiff"]);
+        let deep = expand(dir, true);
+        assert_eq!(
+            names(&deep, &root),
+            ["B.jpg", "a.pdf", "b.PNG", "sub/c.png", "x.tiff"]
+        );
+        let twice = expand(&[root.join("a.pdf"), "-".into(), root.join("a.pdf")], false);
+        assert_eq!(names(&twice[..1], &root), ["a.pdf"]);
+        assert_eq!(twice[1].name, "-");
+        assert_eq!(twice[2].name, twice[0].name);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_folders_are_not_followed() {
+        let root = tree("links", &["real/a.png", "dir/b.png"]);
+        std::os::unix::fs::symlink(root.join("real"), root.join("dir/link")).unwrap();
+        std::os::unix::fs::symlink(root.join("real/a.png"), root.join("dir/c.png")).unwrap();
+        let read = expand(&[root.join("dir")], true);
+        assert_eq!(names(&read, &root), ["dir/b.png", "dir/c.png"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_files_are_not_found_or_a_wildcard() {
+        let load = |name: &str| expand(&[name.into()], false)[0].load().unwrap_err();
+        assert_eq!(load("no-such.png"), Error::not_found("no-such.png"));
+        assert_eq!(load("photos/*.png"), Error::wildcard("photos/*.png"));
+        let root = tree("load", &["a.png"]);
+        let a = root.join("a.png");
+        assert_eq!(expand(&[a], false)[0].load(), Ok(vec![]));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn pages(list: &str, count: usize) -> (Result<Vec<usize>, Error>, Vec<Warning>) {
         let mut warnings = vec![];
