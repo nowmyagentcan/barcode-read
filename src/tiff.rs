@@ -141,12 +141,8 @@ fn page(tiff: &mut Tiff, number: usize, palette: bool) -> Result<Page, Error> {
     };
     let layout = tiff.image_buffer_layout().map_err(unreadable)?;
     let planar = layout.planes > 1 && color.bit_depth() % 8 == 0;
-    let bits = u32::from(color.bit_depth())
-        * if planar {
-            1
-        } else {
-            u32::from(color.num_samples())
-        };
+    let per_pixel = if planar { 1 } else { color.num_samples() };
+    let bits = u32::from(color.bit_depth()) * u32::from(per_pixel);
     let pixels = match planar || tiff.get_chunk_type() == ChunkType::Tile {
         true => chunks(tiff, &layout, bits, w, h)?,
         false => tiff.read_image().map_err(unreadable)?,
