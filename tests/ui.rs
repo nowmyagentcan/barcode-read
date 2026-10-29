@@ -434,7 +434,6 @@ fn refuses_a_nul_or_bare_cr_in_a_header_value() {
 }
 
 #[test]
-#[ignore = "known bug: R3-09"]
 fn refuses_a_bare_cr_at_the_end_of_a_header_value() {
     let server = Server::start(&["--no-open"]);
     let local = "POST /api/read HTTP/1.1\r\nHost: 127.0.0.1:{port}";
