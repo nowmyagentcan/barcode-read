@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 
 use base64::prelude::{BASE64_STANDARD, Engine};
-use image::{GrayImage, imageops};
+use image::{GrayImage, imageops, metadata::Orientation};
 use zxingcpp::{
     Barcode, BarcodeFormat, BarcodeReader, Binarizer, ContentType, EanAddOnSymbol, FromStr,
     ImageFormat, ImageView, TextMode,
@@ -53,6 +53,36 @@ pub struct Sequence {
     pub id: String,
 }
 
+/// One image or page in 8-bit grey, ready for the decoding passes.
+#[derive(Debug)]
+pub struct Page {
+    /// 1-based; 1 for a single image.
+    pub number: usize,
+    pub grey: GrayImage,
+    /// How the stored pixels are turned for display (EXIF); positions are reported as displayed.
+    pub orientation: Orientation,
+}
+
+impl Page {
+    pub fn new(number: usize, grey: GrayImage) -> Self {
+        Self {
+            number,
+            grey,
+            orientation: Orientation::NoTransforms,
+        }
+    }
+
+    /// Width and height as displayed.
+    pub fn size(&self) -> (u32, u32) {
+        let (w, h) = self.grey.dimensions();
+        if sideways(self.orientation) {
+            (h, w)
+        } else {
+            (w, h)
+        }
+    }
+}
+
 /// The codes in one image, and how long each pass that ran took.
 #[derive(Debug, Default)]
 pub struct Found {
@@ -74,7 +104,8 @@ pub fn parse_formats(list: &str) -> Result<Vec<BarcodeFormat>, Error> {
 /// Reads every code on one page. Each later pass runs only when the earlier ones found nothing:
 /// 1. zxing-cpp's thorough defaults; 2. the same with a global-histogram binarizer;
 /// 3. pass 1 on a 2x upscale, for images up to 1000 px whose codes may be too small.
-pub fn find_codes(img: &GrayImage, page: usize, options: &Options) -> Result<Found, Error> {
+pub fn find_codes(page: &Page, options: &Options) -> Result<Found, Error> {
+    let img = &page.grey;
     let mut found = Found::default();
     let mut pass = |img: &GrayImage, binarizer| {
         let start = Instant::now();
@@ -93,7 +124,16 @@ pub fn find_codes(img: &GrayImage, page: usize, options: &Options) -> Result<Fou
             halve = true;
         }
     }
-    found.codes = codes.iter().map(|b| code(b, page, halve)).collect();
+    found.codes = codes.iter().map(|b| code(b, page.number, halve)).collect();
+    if page.orientation != Orientation::NoTransforms {
+        let (w, h) = img.dimensions();
+        for c in &mut found.codes {
+            c.position = c
+                .position
+                .map(|p| turn(page.orientation, p, w as i32, h as i32));
+            c.rotation = rotation(&c.position);
+        }
+    }
     found.codes.sort_by_key(|c| {
         let min = |axis: usize| c.position.iter().map(|p| p[axis]).min();
         (min(1), min(0))
@@ -160,6 +200,34 @@ fn code(b: &Barcode, page: usize, halve: bool) -> Code {
     }
 }
 
+fn sideways(o: Orientation) -> bool {
+    use Orientation::*;
+    matches!(o, Rotate90 | Rotate270 | Rotate90FlipH | Rotate270FlipH)
+}
+
+/// Where a corner of a `w` x `h` stored image shows once its EXIF orientation is applied.
+/// zxing-cpp's corners sit on pixel edges, so a mirror maps x to w - x (kept inside the image).
+fn turn(o: Orientation, [x, y]: [i32; 2], w: i32, h: i32) -> [i32; 2] {
+    use Orientation::*;
+    let (right, bottom) = ((w - x).clamp(0, w - 1), (h - y).clamp(0, h - 1));
+    match o {
+        NoTransforms => [x, y],
+        FlipHorizontal => [right, y],
+        Rotate180 => [right, bottom],
+        FlipVertical => [x, bottom],
+        Rotate90FlipH => [y, x],
+        Rotate90 => [bottom, x],
+        Rotate270FlipH => [bottom, right],
+        Rotate270 => [y, right],
+    }
+}
+
+/// zxing-cpp's rotation: the angle of the line from the left edge's middle to the right edge's.
+fn rotation([tl, tr, br, bl]: &[[i32; 2]; 4]) -> i32 {
+    let [x, y] = [0, 1].map(|i| f64::from(tr[i] + br[i] - tl[i] - bl[i]));
+    y.atan2(x).to_degrees().round() as i32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,12 +285,15 @@ mod tests {
             fast,
             ..Options::default()
         };
-        find_codes(img, 1, &options).unwrap().passes.len()
+        find_codes(&Page::new(1, img.clone()), &options)
+            .unwrap()
+            .passes
+            .len()
     }
 
     #[test]
     fn later_passes_run_only_when_nothing_was_found() {
-        let found = find_codes(&qr("one pass"), 1, &Options::default()).unwrap();
+        let found = find_codes(&Page::new(1, qr("one pass")), &Options::default()).unwrap();
         assert_eq!(
             (found.codes[0].text.as_str(), found.passes.len()),
             ("one pass", 1)
@@ -239,7 +310,7 @@ mod tests {
             fast: true,
         };
         assert!(
-            find_codes(&qr("skipped"), 1, &options)
+            find_codes(&Page::new(1, qr("skipped")), &options)
                 .unwrap()
                 .codes
                 .is_empty()
@@ -248,12 +319,18 @@ mod tests {
             formats: parse_formats("all-matrix").unwrap(),
             fast: true,
         };
-        assert_eq!(find_codes(&qr("kept"), 1, &options).unwrap().codes.len(), 1);
+        assert_eq!(
+            find_codes(&Page::new(1, qr("kept")), &options)
+                .unwrap()
+                .codes
+                .len(),
+            1
+        );
     }
 
     #[test]
     fn reports_raw_bytes_only_for_payloads_that_are_not_text() {
-        let found = find_codes(&qr("plain"), 1, &Options::default()).unwrap();
+        let found = find_codes(&Page::new(1, qr("plain")), &Options::default()).unwrap();
         let c = &found.codes[0];
         assert_eq!((c.content, c.bytes_base64.as_deref()), ("text", None));
         assert_eq!(
@@ -271,7 +348,9 @@ mod tests {
                 .from_slice(&bytes)
                 .unwrap(),
         );
-        let c = &find_codes(&img, 1, &Options::default()).unwrap().codes[0];
+        let c = &find_codes(&Page::new(1, img), &Options::default())
+            .unwrap()
+            .codes[0];
         assert_eq!(c.content, "binary");
         assert_eq!(
             BASE64_STANDARD
@@ -279,5 +358,40 @@ mod tests {
                 .unwrap(),
             bytes
         );
+    }
+
+    #[test]
+    fn positions_follow_the_displayed_orientation() {
+        use Orientation::*;
+        // A QR off-centre on a wide canvas, so every turn and flip moves it somewhere else.
+        let mut stored = GrayImage::from_pixel(300, 200, image::Luma([255]));
+        imageops::replace(&mut stored, &qr("turned"), 20, 10);
+        let turns = [Rotate90, Rotate180, Rotate270];
+        let flips = [FlipHorizontal, FlipVertical, Rotate90FlipH, Rotate270FlipH];
+        for o in turns.into_iter().chain(flips) {
+            let page = Page {
+                orientation: o,
+                ..Page::new(1, stored.clone())
+            };
+            let mapped = &find_codes(&page, &Options::default()).unwrap().codes[0];
+            let mut shown = image::DynamicImage::ImageLuma8(stored.clone());
+            shown.apply_orientation(o);
+            assert_eq!(page.size(), shown.to_luma8().dimensions(), "{o:?}");
+            let seen = &find_codes(&Page::new(1, shown.to_luma8()), &Options::default())
+                .unwrap()
+                .codes[0];
+            // Corner estimates differ by a pixel or two between the two images. zxing-cpp names
+            // the corners of a mirrored symbol differently, so for flips only the points count.
+            let (m, s) = (mapped.position, seen.position);
+            let near =
+                |a: &[i32; 2], b: &[i32; 2]| (a[0] - b[0]).abs() <= 2 && (a[1] - b[1]).abs() <= 2;
+            let close = if flips.contains(&o) {
+                m.iter().all(|a| s.iter().any(|b| near(a, b)))
+            } else {
+                let turn = (mapped.rotation - seen.rotation).rem_euclid(360);
+                (turn <= 1 || turn >= 359) && m.iter().zip(&s).all(|(a, b)| near(a, b))
+            };
+            assert!(close, "{o:?}: {m:?} vs {s:?}");
+        }
     }
 }

@@ -3,10 +3,12 @@
 
 mod common;
 
-use barcode_read::decode::Options;
+use barcode_read::decode::{Options, Page, find_codes};
+use barcode_read::{input::Kind, raster};
 use base64::prelude::{BASE64_STANDARD, Engine};
-use common::{bytes_code, code, encode, read, texts};
-use image::{GrayImage, ImageBuffer, ImageFormat, Luma, LumaA, imageops};
+use common::{bytes_code, code, encode, read, texts, with_exif};
+use image::codecs::{jpeg::JpegEncoder, png::PngEncoder, webp::WebPEncoder};
+use image::{GrayImage, ImageBuffer, ImageFormat, Luma, LumaA, imageops, metadata::Orientation};
 use zxingcpp::BarcodeFormat::{self, *};
 
 fn png(img: &GrayImage) -> Vec<u8> {
@@ -211,6 +213,32 @@ fn reads_every_image_format_and_sample_depth() {
     for file in files {
         let found = read(&file, &Options::default());
         assert_eq!(found.codes[0].text, "every format", "{:?}", &file[..4]);
+    }
+}
+
+#[test]
+fn reports_an_exif_turned_photo_as_displayed() {
+    let stored = canvas(300, 200, &[(&code(QRCode, "turned", ""), 20, 10)]);
+    let (mut jpeg, mut png, mut webp) = (vec![], vec![], vec![]);
+    with_exif(JpegEncoder::new(&mut jpeg), &stored, 6);
+    with_exif(PngEncoder::new(&mut png), &stored, 6);
+    with_exif(WebPEncoder::new_lossless(&mut webp), &stored, 6);
+    let shown = Page::new(1, imageops::rotate90(&stored));
+    let expected = &find_codes(&shown, &Options::default()).unwrap().codes[0];
+    for (kind, bytes) in [(Kind::Jpeg, jpeg), (Kind::Png, png), (Kind::Webp, webp)] {
+        let page = raster::image(kind, &bytes).unwrap();
+        assert_eq!(page.orientation, Orientation::Rotate90, "{kind:?}");
+        assert_eq!(page.size(), (200, 300));
+        let c = &find_codes(&page, &Options::default()).unwrap().codes[0];
+        assert_eq!((c.text.as_str(), c.rotation), ("turned", expected.rotation));
+        for (got, want) in c.position.iter().zip(&expected.position) {
+            assert!(
+                (got[0] - want[0]).abs() <= 2 && (got[1] - want[1]).abs() <= 2,
+                "{kind:?}: {:?} vs {:?}",
+                c.position,
+                expected.position
+            );
+        }
     }
 }
 
