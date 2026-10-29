@@ -8,6 +8,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
+use barcode_read::decode::C0;
 use barcode_read::engine::{FileResult, Report};
 use barcode_read::input::Kind;
 use base64::prelude::{BASE64_STANDARD, Engine};
@@ -197,13 +198,6 @@ pub fn summary(out: &mut Out<impl Write>, report: &Report) -> io::Result<()> {
     let line = out.look.paint(DIM, &line);
     out.line(&line)
 }
-
-/// zxing-cpp's names for the C0 controls.
-const C0: [&str; 32] = [
-    "NUL", "SOH", "STX", "ETX", "EOT", "ENQ", "ACK", "BEL", "BS", "HT", "LF", "VT", "FF", "CR",
-    "SO", "SI", "DLE", "DC1", "DC2", "DC3", "DC4", "NAK", "SYN", "ETB", "CAN", "EM", "SUB", "ESC",
-    "FS", "GS", "RS", "US",
-];
 
 /// `s` safe for a terminal: C0 controls but `\n` and `\t` as `<ESC>` and the like, DEL as
 /// `<DEL>`, C1 controls and the bidi controls that can disguise text as `<U+202E>` and the like.

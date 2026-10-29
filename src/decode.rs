@@ -17,6 +17,13 @@ use crate::error::Error;
 /// Images whose longer side is at most this get the upscaled third pass.
 const UPSCALE_MAX_SIDE: u32 = 1000;
 
+/// zxing-cpp's names for the C0 controls.
+pub const C0: [&str; 32] = [
+    "NUL", "SOH", "STX", "ETX", "EOT", "ENQ", "ACK", "BEL", "BS", "HT", "LF", "VT", "FF", "CR",
+    "SO", "SI", "DLE", "DC1", "DC2", "DC3", "DC4", "NAK", "SYN", "ETB", "CAN", "EM", "SUB", "ESC",
+    "FS", "GS", "RS", "US",
+];
+
 /// One code found on a page.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct Code {
@@ -189,7 +196,11 @@ fn code(b: &Barcode, page: usize, halve: bool) -> Code {
     Code {
         page,
         format: b.format().to_string(),
-        text: b.text(),
+        // zxing-cpp has no text for an ECI it doesn't know.
+        text: match content {
+            "unknown_eci" => escaped(&b.bytes()),
+            _ => b.text(),
+        },
         content,
         bytes_base64: (content != "text").then(|| BASE64_STANDARD.encode(b.bytes())),
         symbology_id: b.symbology_identifier(),
@@ -203,6 +214,17 @@ fn code(b: &Barcode, page: usize, halve: bool) -> Code {
             id: b.sequence_id(),
         }),
     }
+}
+
+/// Bytes as Latin-1, escaped as zxing-cpp escapes a binary payload: `<NUL>`, `<DEL>`, `<U+80>`.
+fn escaped(bytes: &[u8]) -> String {
+    let char = |b: u8| match b {
+        0..=0x1F => format!("<{}>", C0[usize::from(b)]),
+        0x7F => "<DEL>".into(),
+        0x80..=0xA0 => format!("<U+{b:02X}>"),
+        b => char::from(b).into(),
+    };
+    bytes.iter().copied().map(char).collect()
 }
 
 /// Where a corner of a `w` x `h` stored image shows once its EXIF orientation is applied.
@@ -231,6 +253,12 @@ fn rotation([tl, tr, br, bl]: &[[i32; 2]; 4]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn escapes_bytes_as_zxing_cpp_does() {
+        let bytes = [0, 0x1B, b'a', 0x7F, 0x80, 0xA0, 0xE9, 0xFF];
+        assert_eq!(escaped(&bytes), "<NUL><ESC>a<DEL><U+80><U+A0>éÿ");
+    }
 
     #[test]
     fn format_names_ignore_case_spaces_and_separators() {

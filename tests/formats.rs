@@ -534,7 +534,6 @@ fn a_gif_frame_larger_than_its_canvas_is_refused() {
 }
 
 #[test]
-#[ignore = "known bug: QA-05"]
 fn an_unknown_eci_payload_keeps_an_escaped_text() {
     let payload = b"\0\xFFQA\x1B[31m";
     let qr = zxingcpp::create(QRCode)
