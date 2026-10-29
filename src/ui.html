@@ -23,8 +23,7 @@ form { display: grid; gap: 12px; }
 #zone:hover, #zone.over { border-color: var(--accent); background: var(--field); }
 #chosen { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
 label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
-input { width: 100%; min-height: 40px; padding: 8px 10px; font: inherit; font-size: 15px; color: var(--fg); background: var(--field); border: 1px solid var(--line); border-radius: var(--r); }
-select { width: 100%; min-height: 40px; padding: 8px 10px; font: inherit; font-size: 15px; color: var(--fg); background: var(--field); border: 1px solid var(--line); border-radius: var(--r); }
+input, select { width: 100%; min-height: 40px; padding: 8px 10px; font: inherit; font-size: 15px; color: var(--fg); background: var(--field); border: 1px solid var(--line); border-radius: var(--r); }
 .opts { display: grid; grid-template-columns: 1.4fr 1fr 6rem; gap: 12px; margin-top: 10px; }
 .check { grid-column: span 2; display: flex; align-items: center; gap: 8px; align-self: end; min-height: 40px; font-size: 15px; color: var(--fg); }
 .check input { width: 18px; min-height: 18px; accent-color: var(--accent); }
@@ -151,12 +150,10 @@ const tag = c => c.content === "text" ? "" : c.content === "gs1" ? "GS1" : `${c.
 const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
 const name = p => p.split(/[\\/]/).pop();
 
-function line(f, c) { return [name(f.path), paged(f) ? `page ${c.page}` : "", c.format, tag(c)].filter(Boolean).join("  "); }
-
 function asText(files) {
   const lines = [];
   for (const f of files) {
-    for (const c of f.barcodes) lines.push(line(f, c), ...c.text.split("\n").map(t => "  " + shown(t)));
+    for (const c of f.barcodes) lines.push([name(f.path), paged(f) ? `page ${c.page}` : "", c.format, tag(c)].filter(Boolean).join("  "), ...c.text.split("\n").map(t => "  " + shown(t)));
     if (f.error) lines.push(`✗ ${name(f.path)}: ${f.error.message}`, ...(f.error.hint ? ["  " + f.error.hint] : []));
     for (const w of f.warnings) w.code === "none_found"
       ? lines.push(`${name(f.path)}  no barcode found`, ...(w.message.slice(18) ? ["  " + w.message.slice(18)] : []))
@@ -225,15 +222,13 @@ form.addEventListener("submit", async ev => {
   }
   const opts = { formats: $("#formats").value, pages: $("#pages").value.trim(), dpi: Number($("#dpi").value) || 300, password: $("#password").value, fast: $("#fast").checked };
   for (const k in opts) if (opts[k] === "" || opts[k] === false) delete opts[k];
-  const status = el("div", "head"), list = el("div");
-  list.style.display = "contents";
-  out.replaceChildren(status, list);
+  const status = el("div", "head");
+  out.replaceChildren(status);
   for (const [i, file] of chosen.entries()) {
     const wait = setTimeout(() => {
       out.setAttribute("aria-busy", "true");
-      status.replaceChildren(el("div", "bar"), el("p", "muted", `Reading ${i + 1} of ${chosen.length} · ${file.name}`));
-      status.firstChild.setAttribute("role", "progressbar");
-      status.firstChild.setAttribute("aria-label", "Reading");
+      status.innerHTML = '<div class="bar" role="progressbar" aria-label="Reading"></div>';
+      status.append(el("p", "muted", `Reading ${i + 1} of ${chosen.length} · ${file.name}`));
     }, 150);
     let f;
     try { f = file.size > LIMIT ? tooBig(file) : await read(file, opts); }
@@ -242,7 +237,7 @@ form.addEventListener("submit", async ev => {
     if (run !== latest) return;
     if (!f.barcodes) { out.removeAttribute("aria-busy"); out.replaceChildren(); failure(out, f.error); return; }
     results.push(f);
-    list.append(fileBlock(f));
+    out.append(fileBlock(f));
   }
   out.removeAttribute("aria-busy");
   const acts = el("div", "acts");
