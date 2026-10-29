@@ -3,8 +3,8 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use hayro::hayro_interpret::InterpreterSettings;
-use hayro::hayro_syntax::Pdf;
 use hayro::hayro_syntax::page::Page as PdfPage;
+use hayro::hayro_syntax::{DecryptionError, LoadPdfError, Pdf};
 use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::{PixmapSettings, RenderCache, RenderSettings, render};
 use image::{GrayImage, ImageBuffer, Rgba};
@@ -12,24 +12,36 @@ use image::{GrayImage, ImageBuffer, Rgba};
 use crate::Options;
 use crate::decode::Page;
 use crate::error::{Error, Warning, panic_message};
+use crate::input::select;
 use crate::raster::luma;
 
 /// A rendered page stays within 40 megapixels and 65,535 pixels per side.
 const MAX_PIXELS: u64 = 40_000_000;
 const MAX_SIDE: u64 = 65_535;
 
-/// Renders every page in order at `options.dpi`, or at the highest whole DPI that fits the page
-/// limits (with a warning), and hands each to `each` before rendering the next.
+/// Renders the selected pages (`options.pages`) in order at `options.dpi`, or at the highest
+/// whole DPI that fits the page limits (with a warning), and hands each to `each` before
+/// rendering the next. An encrypted file opens with `options.password`.
 pub fn pages(
     bytes: Vec<u8>,
     options: &Options,
     warnings: &mut Vec<Warning>,
     mut each: impl FnMut(Page),
 ) -> Result<(), Error> {
-    let pdf = Pdf::new(bytes).map_err(|_| Error::corrupt_pdf("its structure can't be read"))?;
+    let password = options.password.as_deref();
+    let pdf = Pdf::new_with_password(bytes, password.unwrap_or("")).map_err(|e| match e {
+        LoadPdfError::Decryption(DecryptionError::PasswordProtected) if password.is_some() => {
+            Error::pdf_wrong_password()
+        }
+        LoadPdfError::Decryption(DecryptionError::PasswordProtected) => Error::pdf_password(),
+        LoadPdfError::Decryption(DecryptionError::UnsupportedAlgorithm) => Error::pdf_encryption(),
+        LoadPdfError::Decryption(_) => Error::corrupt_pdf("its encryption settings are damaged"),
+        LoadPdfError::Invalid => Error::corrupt_pdf("its structure can't be read"),
+    })?;
     let cache = RenderCache::new();
-    for (i, page) in pdf.pages().iter().enumerate() {
-        let number = i + 1;
+    let all = pdf.pages();
+    for number in select(options.pages.as_ref(), all.len(), warnings)? {
+        let page = &all[number - 1];
         let Some(dpi) = fit(options.dpi, page.render_dimensions()) else {
             warnings.push(Warning::page_failed(number, "it is too large to render"));
             continue;

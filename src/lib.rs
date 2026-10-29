@@ -18,6 +18,10 @@ pub struct Options {
     pub fast: bool,
     /// The resolution PDF pages are rendered at, 72 to 1200.
     pub dpi: u32,
+    /// The PDF and TIFF pages to read; `None` reads them all.
+    pub pages: Option<input::PageList>,
+    /// The password of an encrypted PDF.
+    pub password: Option<String>,
 }
 
 impl Default for Options {
@@ -26,6 +30,8 @@ impl Default for Options {
             formats: vec![],
             fast: false,
             dpi: 300,
+            pages: None,
+            password: None,
         }
     }
 }

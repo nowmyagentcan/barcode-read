@@ -1,6 +1,6 @@
 //! What kind of file an input is, from its first bytes (never from its name).
 
-use crate::error::{Error, Unsupported};
+use crate::error::{Error, Unsupported, Warning};
 
 /// How many leading bytes `sniff` looks at.
 pub const HEAD: usize = 1024;
@@ -87,9 +87,122 @@ pub fn sniff(bytes: &[u8]) -> Result<Kind, Error> {
     Ok(kind)
 }
 
+/// A `--pages` list such as `1-3,7,10-`: 1-based pages and ranges, where an open end means the
+/// last page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageList {
+    /// As given, for messages.
+    text: String,
+    ranges: Vec<(usize, Option<usize>)>,
+}
+
+impl PageList {
+    pub fn parse(text: &str) -> Result<Self, Error> {
+        let bad = || Error::bad_pages(text);
+        let number = |s: &str| {
+            let s = s.trim();
+            let digits = !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+            s.parse().ok().filter(|&n| digits && n > 0).ok_or_else(bad)
+        };
+        let range = |item: &str| match item.split_once('-') {
+            None => number(item).map(|n| (n, Some(n))),
+            Some((from, to)) if to.trim().is_empty() => Ok((number(from)?, None)),
+            Some((from, to)) => {
+                let (from, to) = (number(from)?, number(to)?);
+                (from <= to).then_some((from, Some(to))).ok_or_else(bad)
+            }
+        };
+        let ranges = text.split(',').map(range).collect::<Result<_, _>>()?;
+        Ok(Self {
+            text: text.into(),
+            ranges,
+        })
+    }
+}
+
+/// The pages to read, in order and once each, of a file with `count` pages: all of them, or
+/// those `list` selects. Listed pages past the end add a `pages_missing` warning; a list that
+/// selects none of the pages is the error `no_pages`.
+pub fn select(
+    list: Option<&PageList>,
+    count: usize,
+    warnings: &mut Vec<Warning>,
+) -> Result<Vec<usize>, Error> {
+    let Some(list) = list else {
+        return Ok((1..=count).collect());
+    };
+    let selected = |p: usize| {
+        list.ranges
+            .iter()
+            .any(|&(a, b)| a <= p && b.is_none_or(|b| p <= b))
+    };
+    let pages: Vec<_> = (1..=count).filter(|&p| selected(p)).collect();
+    if pages.is_empty() {
+        return Err(Error::no_pages(&list.text, count));
+    }
+    let past = count + 1;
+    let missing: Vec<_> = list
+        .ranges
+        .iter()
+        .filter_map(|&(a, b)| match b {
+            None => (a > count).then(|| format!("{a}-")),
+            Some(b) if b < past => None,
+            Some(b) if a.max(past) == b => Some(b.to_string()),
+            Some(b) => Some(format!("{}-{b}", a.max(past))),
+        })
+        .collect();
+    if !missing.is_empty() {
+        warnings.push(Warning::pages_missing(count, &missing.join(",")));
+    }
+    Ok(pages)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pages(list: &str, count: usize) -> (Result<Vec<usize>, Error>, Vec<Warning>) {
+        let mut warnings = vec![];
+        let list = PageList::parse(list).unwrap();
+        (select(Some(&list), count, &mut warnings), warnings)
+    }
+
+    #[test]
+    fn page_lists_take_numbers_ranges_and_open_ends() {
+        assert_eq!(pages("1-3,7,10-", 12).0, Ok(vec![1, 2, 3, 7, 10, 11, 12]));
+        assert_eq!(pages(" 3 , 1-2,2 ", 5).0, Ok(vec![1, 2, 3]));
+        assert_eq!(select(None, 3, &mut vec![]), Ok(vec![1, 2, 3]));
+        for bad in [
+            "", "0", "1,,2", "3-1", "-3", "1-2-3", "a", "+1", "1.5", "1 2",
+        ] {
+            assert_eq!(PageList::parse(bad), Err(Error::bad_pages(bad)), "{bad:?}");
+        }
+        assert_eq!(
+            Error::bad_pages("x").hint,
+            Some("Use page numbers and ranges like 1-3,7,10-")
+        );
+    }
+
+    #[test]
+    fn pages_past_the_end_warn_and_selecting_none_fails() {
+        let (read, warnings) = pages("2-9", 3);
+        assert_eq!(read, Ok(vec![2, 3]));
+        assert_eq!(
+            warnings[0].message,
+            "This file has 3 pages; page 4-9 doesn't exist."
+        );
+        assert_eq!(
+            pages("1,4,6-,2-4", 3).1,
+            [Warning::pages_missing(3, "4,6-,4")]
+        );
+        assert!(pages("1-3,3-", 3).1.is_empty());
+        let (read, _) = pages("9", 3);
+        let e = read.unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str()),
+            ("no_pages", "--pages 9 selects none of this file's 3 pages.")
+        );
+    }
 
     #[test]
     fn reads_every_supported_signature() {

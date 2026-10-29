@@ -7,37 +7,42 @@ use ::tiff::tags::{CompressionMethod, Tag};
 use ::tiff::{ColorType, TiffError, TiffUnsupportedError};
 use image::{DynamicImage, GrayImage, ImageBuffer, RgbImage, metadata::Orientation};
 
+use crate::Options;
 use crate::decode::Page;
 use crate::error::{Error, Warning};
+use crate::input::select;
 use crate::raster::{check_size, to_grey};
 
 type Tiff<'a> = Decoder<Cursor<&'a [u8]>>;
 
-/// Reads every page in order and hands each to `each`. A page that can't be decoded becomes a
-/// `page_failed` warning and the others still read; only an unreadable first page fails the file.
+/// Reads the selected pages (`options.pages`) in order and hands each to `each`. A page that
+/// can't be decoded becomes a `page_failed` warning and the others still read; only an
+/// unreadable first directory fails the file, and a broken later one ends it.
 pub fn pages(
     bytes: &[u8],
+    options: &Options,
     warnings: &mut Vec<Warning>,
     mut each: impl FnMut(Page),
 ) -> Result<(), Error> {
     let mut tiff = Decoder::new(Cursor::new(bytes))
         .map_err(|e| Error::corrupt_image("TIFF", e))?
         .with_limits(limits());
-    let mut number = 1;
-    loop {
-        match page(&mut tiff, number) {
+    let mut count = 1;
+    while tiff.more_images() {
+        if let Err(e) = tiff.next_image() {
+            warnings.push(Warning::page_failed(count + 1, reason(e)));
+            break;
+        }
+        count += 1;
+    }
+    for number in select(options.pages.as_ref(), count, warnings)? {
+        let page = tiff.seek_to_image(number - 1).map_err(reason);
+        match page.and_then(|()| self::page(&mut tiff, number)) {
             Ok(page) => each(page),
             Err(reason) => warnings.push(Warning::page_failed(number, reason)),
         }
-        if !tiff.more_images() {
-            return Ok(());
-        }
-        number += 1;
-        if let Err(e) = tiff.next_image() {
-            warnings.push(Warning::page_failed(number, reason(e)));
-            return Ok(());
-        }
     }
+    Ok(())
 }
 
 /// Room for the largest image allowed (120 megapixels of 16-bit RGBA).
@@ -178,7 +183,8 @@ mod tests {
 
         let mut read = vec![];
         let mut warnings = vec![];
-        pages(bytes.get_ref(), &mut warnings, |p| read.push(p)).unwrap();
+        let options = Options::default();
+        pages(bytes.get_ref(), &options, &mut warnings, |p| read.push(p)).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
         let summary: Vec<_> = read
             .iter()
@@ -194,11 +200,23 @@ mod tests {
             ]
         );
         assert_eq!(read[1].orientation, Orientation::Rotate90);
+
+        let options = Options {
+            pages: Some(crate::input::PageList::parse("2,4-").unwrap()),
+            ..Options::default()
+        };
+        let mut numbers = vec![];
+        pages(bytes.get_ref(), &options, &mut warnings, |p| {
+            numbers.push(p.number)
+        })
+        .unwrap();
+        assert_eq!((numbers, warnings), (vec![2, 4], vec![]));
     }
 
     #[test]
     fn a_damaged_file_is_corrupt_image() {
-        let e = pages(b"II*\0\xFF\xFF\xFF\x7F", &mut vec![], |_| ()).unwrap_err();
+        let bytes = b"II*\0\xFF\xFF\xFF\x7F";
+        let e = pages(bytes, &Options::default(), &mut vec![], |_| ()).unwrap_err();
         assert_eq!(e.code, "corrupt_image");
         assert!(
             e.message.starts_with("Can't decode this TIFF file: "),

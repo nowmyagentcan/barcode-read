@@ -4,6 +4,8 @@ mod common;
 
 use barcode_read::Options;
 use barcode_read::error::Warning;
+use barcode_read::input::PageList;
+use barcode_read::pdf;
 use common::{pdf_file, read_pages, vector_qr};
 
 const A4: (f32, f32) = (595.0, 842.0);
@@ -12,7 +14,7 @@ const A4: (f32, f32) = (595.0, 842.0);
 fn three_pages() -> Vec<u8> {
     let blank = (A4.0, A4.1, String::new());
     let qr = (A4.0, A4.1, vector_qr("page two", 100.0, 100.0, 3.0, A4.1));
-    pdf_file(&[blank.clone(), qr, blank])
+    pdf_file(&[blank.clone(), qr, blank], "")
 }
 
 #[test]
@@ -58,7 +60,10 @@ fn a_lower_dpi_halves_the_coordinates() {
 #[test]
 fn reads_an_a0_page_at_a_reduced_dpi() {
     let a0 = (2384.0, 3370.0);
-    let bytes = pdf_file(&[(a0.0, a0.1, vector_qr("a0 poster", 200.0, 200.0, 6.0, a0.1))]);
+    let bytes = pdf_file(
+        &[(a0.0, a0.1, vector_qr("a0 poster", 200.0, 200.0, 6.0, a0.1))],
+        "",
+    );
     let read = read_pages(&bytes, &Options::default());
     assert_eq!(read.pages, [(1, (5297, 7488), Some(160))]);
     assert_eq!(read.codes[0].text, "a0 poster");
@@ -68,5 +73,52 @@ fn reads_an_a0_page_at_a_reduced_dpi() {
             code: "dpi_reduced",
             message: "Page 1 is too large for 300 dpi, so it was read at 160 dpi.".into()
         }]
+    );
+}
+
+fn with_pages(list: &str) -> Options {
+    Options {
+        pages: Some(PageList::parse(list).unwrap()),
+        ..Options::default()
+    }
+}
+
+#[test]
+fn reads_only_the_chosen_pages() {
+    let read = read_pages(&three_pages(), &with_pages("2"));
+    assert_eq!(read.pages.iter().map(|p| p.0).collect::<Vec<_>>(), [2]);
+    assert_eq!(read.codes[0].page, 2);
+    let read = read_pages(&three_pages(), &with_pages("2-9"));
+    assert_eq!(read.pages.len(), 2);
+    assert_eq!(read.warnings[0].code, "pages_missing");
+}
+
+#[test]
+fn a_list_of_pages_past_the_end_is_an_error() {
+    let mut warnings = vec![];
+    let e = pdf::pages(three_pages(), &with_pages("9"), &mut warnings, |_| ()).unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str()),
+        ("no_pages", "--pages 9 selects none of this file's 3 pages.")
+    );
+}
+
+#[test]
+fn an_unsupported_security_handler_is_pdf_encryption() {
+    let page = (A4.0, A4.1, String::new());
+    let encrypt = "/Encrypt << /Filter /Adobe.PubSec /V 4 /R 4 >> /ID [<00> <00>]";
+    let e = pdf::pages(
+        pdf_file(&[page], encrypt),
+        &Options::default(),
+        &mut vec![],
+        |_| (),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str()),
+        (
+            "pdf_encryption",
+            "This PDF uses an encryption method that isn't supported."
+        )
     );
 }

@@ -78,7 +78,7 @@ pub fn read_pages(bytes: &[u8], options: &Options) -> Read {
     let mut warnings = vec![];
     match input::sniff(bytes).unwrap() {
         Kind::Pdf => pdf::pages(bytes.to_vec(), options, &mut warnings, each).unwrap(),
-        Kind::Tiff => tiff::pages(bytes, &mut warnings, each).unwrap(),
+        Kind::Tiff => tiff::pages(bytes, options, &mut warnings, each).unwrap(),
         kind => each(raster::image(kind, bytes, &mut warnings).unwrap()),
     }
     read.warnings = warnings;
@@ -103,8 +103,9 @@ pub fn vector_qr(text: &str, left: f32, top: f32, module: f32, height: f32) -> S
     ops + "f\n"
 }
 
-/// A PDF with one page per (width, height, content stream), sizes in points.
-pub fn pdf_file(pages: &[(f32, f32, String)]) -> Vec<u8> {
+/// A PDF with one page per (width, height, content stream), sizes in points, and `trailer`
+/// added to its trailer dictionary.
+pub fn pdf_file(pages: &[(f32, f32, String)], trailer: &str) -> Vec<u8> {
     let kids: Vec<_> = (0..pages.len())
         .map(|i| format!("{} 0 R", 3 + 2 * i))
         .collect();
@@ -138,7 +139,7 @@ pub fn pdf_file(pages: &[(f32, f32, String)]) -> Vec<u8> {
         out += &format!("{offset:010} 00000 n \n");
     }
     out += &format!(
-        "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+        "trailer\n<< /Size {} /Root 1 0 R {trailer} >>\nstartxref\n{xref}\n%%EOF\n",
         objects.len() + 1
     );
     out.into_bytes()
