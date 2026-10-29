@@ -273,7 +273,6 @@ fn an_aes_pdf_opens_only_with_its_password() {
 }
 
 #[test]
-#[ignore = "known bug: R3-02"]
 fn a_fax_filled_from_the_low_bit_reads_or_is_refused() {
     // libtiff's Group 4 page and uncompressed page, both with FillOrder 2.
     let file = engine::read(

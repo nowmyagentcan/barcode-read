@@ -2,8 +2,8 @@
 
 use std::io::Cursor;
 
-use ::tiff::decoder::{BufferLayoutPreference, Decoder, DecodingResult, Limits};
-use ::tiff::tags::{CompressionMethod, SampleFormat, Tag};
+use ::tiff::decoder::{BufferLayoutPreference, ChunkType, Decoder, DecodingResult, Limits};
+use ::tiff::tags::{ByteOrder, CompressionMethod, SampleFormat, Tag};
 use ::tiff::{ColorType, TiffError, TiffUnsupportedError};
 use image::{GrayImage, metadata::Orientation};
 
@@ -25,21 +25,27 @@ pub fn pages(
     warnings: &mut Vec<Warning>,
     mut each: impl FnMut(Page),
 ) -> Result<(), Error> {
-    let mut tiff = Decoder::new(Cursor::new(bytes))
-        .map_err(|e| Error::corrupt_image("TIFF", e))?
-        .with_limits(limits());
-    let mut count = 1;
-    while tiff.more_images() {
-        if let Err(e) = tiff.next_image() {
-            warnings.push(Warning::page_failed(count + 1, reason(e)));
+    let mut tiff = open(bytes)?;
+    // Pages the tiff crate can't read as stored are mended in one copy of the file.
+    let (mut copy, mut palette) = (None, vec![]);
+    loop {
+        palette.push(mend(&mut tiff, bytes, &mut copy));
+        if !tiff.more_images() {
             break;
         }
-        count += 1;
+        if let Err(e) = tiff.next_image() {
+            warnings.push(Warning::page_failed(palette.len() + 1, reason(e)));
+            break;
+        }
+    }
+    let count = palette.len();
+    if let Some(copy) = &copy {
+        tiff = open(copy)?;
     }
     let (mut read, mut failed) = (false, None);
     for number in select(options.pages.as_ref(), count, warnings)? {
         let page = tiff.seek_to_image(number - 1).map_err(unreadable);
-        match page.and_then(|()| self::page(&mut tiff, number)) {
+        match page.and_then(|()| self::page(&mut tiff, number, palette[number - 1])) {
             Ok(page) => {
                 read = true;
                 each(page);
@@ -59,12 +65,72 @@ pub fn pages(
     }
 }
 
+fn open(bytes: &[u8]) -> Result<Tiff<'_>, Error> {
+    let tiff = Decoder::new(Cursor::new(bytes)).map_err(|e| Error::corrupt_image("TIFF", e))?;
+    Ok(tiff.with_limits(limits()))
+}
+
+/// Rewrites the current page in `copy` (made from `bytes` when first needed) where tiff 0.11.3
+/// can't read it as stored, and returns whether it is a palette page. Palette pages are marked
+/// BlackIsZero, as tiff refuses them, so the indices come back as grey samples; the data of
+/// pages filled from the low bit of each byte (FillOrder 2, which tiff ignores) is turned
+/// around, except JPEG's, as libtiff does.
+fn mend(tiff: &mut Tiff, bytes: &[u8], copy: &mut Option<Vec<u8>>) -> bool {
+    let mut tag = |tag| tiff.find_tag_unsigned::<u16>(tag).ok().flatten();
+    let palette = tag(Tag::PhotometricInterpretation) == Some(3);
+    let reversed = tag(Tag::FillOrder) == Some(2) && !matches!(tag(Tag::Compression), Some(6 | 7));
+    if palette && let Some(at) = entry(tiff, bytes, Tag::PhotometricInterpretation) {
+        let one = match tiff.byte_order() {
+            ByteOrder::LittleEndian => 1u16.to_le_bytes(),
+            ByteOrder::BigEndian => 1u16.to_be_bytes(),
+        };
+        copy.get_or_insert_with(|| bytes.to_vec())[at..at + 2].copy_from_slice(&one);
+    }
+    if reversed {
+        let (offsets, counts) = match tiff.get_chunk_type() {
+            ChunkType::Strip => (Tag::StripOffsets, Tag::StripByteCounts),
+            ChunkType::Tile => (Tag::TileOffsets, Tag::TileByteCounts),
+        };
+        let (offsets, counts) = (tiff.get_tag_u64_vec(offsets), tiff.get_tag_u64_vec(counts));
+        let copy = copy.get_or_insert_with(|| bytes.to_vec());
+        let chunks = offsets.unwrap_or_default().into_iter();
+        for (at, n) in chunks.zip(counts.unwrap_or_default()) {
+            let (at, n) = (at as usize, n as usize);
+            if let Some(chunk) = copy.get_mut(at..at.saturating_add(n)) {
+                chunk.iter_mut().for_each(|b| *b = b.reverse_bits());
+            }
+        }
+    }
+    palette
+}
+
+/// Where the current page's `tag`, a SHORT, has its value in `bytes`.
+fn entry(tiff: &mut Tiff, bytes: &[u8], tag: Tag) -> Option<usize> {
+    let order = tiff.byte_order();
+    let short = |at: usize| {
+        let b = bytes.get(at..at + 2)?.try_into().ok()?;
+        Some(match order {
+            ByteOrder::LittleEndian => u16::from_le_bytes(b),
+            ByteOrder::BigEndian => u16::from_be_bytes(b),
+        })
+    };
+    // Only classic TIFF is read (input.rs): 12-byte entries after a 2-byte count.
+    let ifd = usize::try_from(tiff.ifd_pointer()?.0).ok()?;
+    let at = (0..short(ifd)?.into())
+        .map(|i: usize| ifd + 2 + i * 12)
+        .find(|&at| short(at) == Some(tag.to_u16()) && short(at + 2) == Some(3))?;
+    short(at + 8).map(|_| at + 8)
+}
+
 /// The page, or why not: `image_too_large`, or `corrupt_image` holding the bare reason.
-fn page(tiff: &mut Tiff, number: usize) -> Result<Page, Error> {
+fn page(tiff: &mut Tiff, number: usize, palette: bool) -> Result<Page, Error> {
     let (w, h) = tiff.dimensions().map_err(unreadable)?;
     check_size(w.into(), h.into())?;
     let orientation = tiff.find_tag_unsigned(Tag::Orientation).ok().flatten();
-    let color = tiff.colortype().map_err(unreadable)?;
+    let color = match tiff.colortype().map_err(unreadable)? {
+        ColorType::Gray(bits) if palette => ColorType::Palette(bits),
+        color => color,
+    };
     let layout = tiff.image_buffer_layout().map_err(unreadable)?;
     let planar = layout.planes > 1 && color.bit_depth() % 8 == 0;
     let pixels = match planar {
@@ -246,7 +312,7 @@ fn unsupported(color: ColorType, format: SampleFormat) -> Error {
 fn unpack(data: &[u8], bits: u8, w: u32, h: u32) -> Option<Vec<u8>> {
     let (bits, w) = (usize::from(bits), w as usize);
     let row = (w * bits).div_ceil(8);
-    let mask = (1u16 << bits) as u8 - 1;
+    let mask = ((1u16 << bits) - 1) as u8;
     let rows = data.get(..row * h as usize)?.chunks_exact(row);
     Some(
         rows.flat_map(|r| (0..w).map(move |x| r[x * bits / 8] >> (8 - bits - x * bits % 8) & mask))

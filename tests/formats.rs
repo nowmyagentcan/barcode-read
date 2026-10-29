@@ -797,7 +797,6 @@ fn reads_or_refuses(tiff: Vec<u8>, text: &str) {
 }
 
 #[test]
-#[ignore = "known bug: R3-01"]
 fn a_palette_tiff_reads() {
     // Index 0 is white and 1 black, so reading the indices as grey would invert the code.
     let qr = code(QRCode, "palette", "");
@@ -832,7 +831,6 @@ fn a_palette_tiff_reads() {
 }
 
 #[test]
-#[ignore = "known bug: R3-02"]
 fn a_tiff_filled_from_the_low_bit_reads_or_is_refused() {
     // FillOrder 2: each byte's bits run from the lowest, as a fax modem sends them.
     let qr = code(QRCode, "fill order", "");
