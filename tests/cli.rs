@@ -522,6 +522,39 @@ fn json_pages_carry_dpi_only_for_pdfs() {
     assert!(run.stdout.ends_with("\"found\":2,\"failed\":0}\n"));
 }
 
+#[test]
+fn a_closed_stdout_or_stderr_ends_the_run_quietly_with_0() {
+    let dir = folder("pipes");
+    fs::write(dir.join("qr.png"), qr_png("closed")).unwrap();
+    let cases: [(&[&str], bool); 6] = [
+        (&["qr.png", "qr.png"], true),
+        (&["qr.png", "--json"], true),
+        (&["qr.png", "--debug"], true),
+        (&["--help"], true),
+        (&["qr.png", "--debug"], false),
+        (&["missing.png", "qr.png"], false),
+    ];
+    for (args, close_stdout) in cases {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_barcode-read"))
+            .args(args)
+            .current_dir(&dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        if close_stdout {
+            drop(child.stdout.take());
+        } else {
+            drop(child.stderr.take());
+        }
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{args:?}");
+        let other = if close_stdout { out.stderr } else { out.stdout };
+        assert!(!String::from_utf8(other).unwrap().contains("Can't write"));
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn a_path_that_is_not_utf8_prints_lossily() {

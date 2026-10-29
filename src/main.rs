@@ -136,11 +136,18 @@ fn main() -> ExitCode {
     }
     let mut out = Out::new(io::stdout().lock(), Look::stdout());
     let mut err = Out::new(io::stderr(), Look::stderr());
-    match read(&cli, &options, &mut out, &mut err) {
+    finish(read(&cli, &options, &mut out, &mut err), &mut err)
+}
+
+/// The exit code of a run: a reader that hung up on stdout or stderr ends it quietly with 0,
+/// any other write error is `io`.
+fn finish(run: io::Result<u8>, err: &mut Out<impl Write>) -> ExitCode {
+    match run {
         Ok(code) => ExitCode::from(code),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
         Err(e) => {
             let e = Error::io(e);
-            let _ = text::error(&mut err, &e.message, e.hint);
+            let _ = text::error(err, &e.message, e.hint);
             ExitCode::from(3)
         }
     }
