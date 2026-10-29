@@ -177,17 +177,22 @@ jobs:
           $files = Get-ChildItem $dir -Name
           if ($LASTEXITCODE -or (Compare-Object $files 'notes.old', 'barcode-read.exe', 'LICENSE', 'THIRD-PARTY-LICENSES.txt')) { throw "left $files" }
           Remove-Item "$dir\notes.old"
-          # An upgrade from an archive without the exe, or with one that doesn't run, keeps the installed one.
+          # An upgrade from an archive without the exe, with one that doesn't run, or without a
+          # licence file keeps the installed files.
           $zip = (Get-Item dist/*-windows-x64.zip).Name
-          New-Item -ItemType Directory missing, invalid, payload | Out-Null
+          New-Item -ItemType Directory missing, invalid, nonotice, payload | Out-Null
           Compress-Archive dist/SHA256SUMS "missing/$zip"
           [IO.File]::WriteAllBytes("$PWD/payload/barcode-read.exe", [byte[]](0, 1, 2, 3))
           Compress-Archive payload/barcode-read.exe "invalid/$zip"
-          foreach ($case in 'missing', 'invalid') {
+          Expand-Archive "dist/$zip" nonotice/x
+          Set-Content nonotice/x/LICENSE 'from a failed upgrade'
+          Compress-Archive nonotice/x/barcode-read.exe, nonotice/x/LICENSE "nonotice/$zip"
+          foreach ($case in 'missing', 'invalid', 'nonotice') {
             "$((Get-FileHash "$case/$zip").Hash)  $zip" | Set-Content "$case/SHA256SUMS"
             $env:BARCODE_READ_BASE = "http://127.0.0.1:8765/$case"
             powershell -NoProfile -File dist/install.ps1
             if (!$LASTEXITCODE -or (Get-ChildItem $dir).Count -ne 3) { throw "a failed upgrade ($case) lost barcode-read.exe" }
+            if (Select-String -Quiet 'failed upgrade' "$dir/LICENSE") { throw "a failed upgrade ($case) replaced LICENSE" }
             & "$dir\barcode-read.exe" --version
             if ($LASTEXITCODE) { throw "barcode-read.exe doesn't run after the $case upgrade" }
           }

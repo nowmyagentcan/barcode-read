@@ -20,6 +20,10 @@
     if ("$new" -notlike 'barcode-read *') {
       throw "barcode-read: $archive has no barcode-read.exe that runs here; nothing was installed."
     }
+    $files = 'barcode-read.exe', 'LICENSE', 'THIRD-PARTY-LICENSES.txt' | ForEach-Object { "$tmp\x\$_" }
+    if ((Test-Path $files) -contains $false) {
+      throw "barcode-read: $archive is missing a licence file; nothing was installed."
+    }
     $dir = Join-Path $env:LOCALAPPDATA 'Programs\barcode-read'
     New-Item -ItemType Directory -Force $dir | Out-Null
     $exe = Join-Path $dir 'barcode-read.exe'
@@ -28,7 +32,7 @@
     # by a later install.
     $old = "$exe.$(Get-Random).old"
     if (Test-Path $exe) { Move-Item $exe $old }
-    try { Copy-Item "$tmp\x\barcode-read.exe", "$tmp\x\LICENSE", "$tmp\x\THIRD-PARTY-LICENSES.txt" $dir }
+    try { Copy-Item $files $dir }
     catch { if (Test-Path $old) { Move-Item -Force $old $exe }; throw }
     Remove-Item "$exe.*.old" -ErrorAction SilentlyContinue
     $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
