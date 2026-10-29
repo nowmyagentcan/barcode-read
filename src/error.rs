@@ -39,6 +39,11 @@ impl Error {
         }
     }
 
+    /// The JSON for an error that stops a run: `{"error": {"code", "message", "hint"}}`.
+    pub fn to_json(&self) -> String {
+        serde_json::json!({ "error": self }).to_string()
+    }
+
     /// The process exit code this error forces: 2 for usage, 3 for runtime and internal, else 1.
     pub fn exit_code(&self) -> u8 {
         match self.code {

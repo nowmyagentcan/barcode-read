@@ -78,12 +78,6 @@ impl<'a> Report<'a> {
     }
 }
 
-/// The JSON for an error that stops a run, such as a bad option.
-#[derive(Debug, Serialize)]
-pub struct Failure<'a> {
-    pub error: &'a Error,
-}
-
 /// Loads and reads one input.
 pub fn read_input(input: &Input, options: &Options) -> FileResult {
     match input.load() {
@@ -264,7 +258,7 @@ mod tests {
         );
         let e = Error::bad_dpi();
         assert_eq!(
-            serde_json::to_string(&Failure { error: &e }).unwrap(),
+            e.to_json(),
             r#"{"error":{"code":"bad_dpi","message":"--dpi must be between 72 and 1200.","hint":null}}"#
         );
     }

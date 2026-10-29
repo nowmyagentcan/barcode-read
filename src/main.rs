@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use barcode_read::Options;
-use barcode_read::engine::{self, Failure, Report};
+use barcode_read::engine::{self, Report};
 use barcode_read::error::Error;
 use barcode_read::input;
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser};
@@ -264,8 +264,7 @@ fn served(result: Result<(), Error>) -> ExitCode {
 /// exits with its code.
 fn fail(e: &Error, json: bool) -> ExitCode {
     let _ = if json {
-        let failure = serde_json::to_string(&Failure { error: e }).expect("plain strings");
-        writeln!(io::stdout(), "{failure}")
+        writeln!(io::stdout(), "{}", e.to_json())
     } else {
         text::error(
             &mut Out::new(io::stderr(), Look::stderr()),

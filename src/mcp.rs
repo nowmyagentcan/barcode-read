@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use barcode_read::engine::{self, Failure, Report};
+use barcode_read::engine::{self, Report};
 use barcode_read::error::Error;
 use barcode_read::{Options, input};
 use rmcp::handler::server::tool::{schema_for_input, schema_for_output};
@@ -56,9 +56,7 @@ impl Server {
         match read(args) {
             Ok(report) => CallToolResult::structured(report),
             // No structured content: clients would check it against the output schema.
-            Err(e) => CallToolResult::error(vec![ContentBlock::text(
-                serde_json::to_string(&Failure { error: &e }).expect("plain strings"),
-            )]),
+            Err(e) => CallToolResult::error(vec![ContentBlock::text(e.to_json())]),
         }
     }
 }

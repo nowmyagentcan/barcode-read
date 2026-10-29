@@ -8,7 +8,7 @@ use std::thread;
 use std::time::Duration;
 
 use barcode_read::Options;
-use barcode_read::engine::{self, Failure};
+use barcode_read::engine;
 use barcode_read::error::Error;
 use serde::Deserialize;
 
@@ -213,8 +213,8 @@ fn respond(reader: &mut BufReader<io::Take<&TcpStream>>, port: u16) -> io::Resul
             }
             Ok(match read(name.as_deref(), options.as_deref(), body) {
                 Ok(file) => (200, JSON, file),
-                Err(e) if e.code == "bad_request" => (400, JSON, failure(&e)),
-                Err(e) => (422, JSON, failure(&e)),
+                Err(e) if e.code == "bad_request" => (400, JSON, e.to_json()),
+                Err(e) => (422, JSON, e.to_json()),
             })
         }
         _ => Ok(error(404, "not_found", "There's nothing here.")),
@@ -261,12 +261,8 @@ fn unescape(s: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
-fn failure(e: &Error) -> String {
-    serde_json::to_string(&Failure { error: e }).expect("plain strings")
-}
-
 fn error(status: u16, code: &'static str, message: &str) -> Response {
-    (status, JSON, failure(&Error::new(code, message, None)))
+    (status, JSON, Error::new(code, message, None).to_json())
 }
 
 #[cfg(test)]
