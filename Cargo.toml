@@ -8,6 +8,7 @@ repository = "https://github.com/nowmyagentcan/barcode-read"
 publish = false
 
 [dependencies]
+image = { version = "0.25.10", default-features = false, features = ["png", "gif", "bmp", "webp", "pnm"] }
 zxing-cpp = { version = "0.5.3", features = ["bundled"] }
 
 [profile.release]
