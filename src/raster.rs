@@ -10,14 +10,16 @@ use image::{
 use zune_jpeg::JpegDecoder;
 use zune_jpeg::zune_core::{bytestream::ZCursor, colorspace::ColorSpace, options::DecoderOptions};
 
-use crate::{decode::Page, error::Error, input::Kind};
+use crate::decode::Page;
+use crate::error::{Error, Warning};
+use crate::input::Kind;
 
 const MAX_SIDE: u32 = 65_535;
 const MAX_PIXELS: u64 = 120_000_000;
 
 /// Decodes a one-image file to grey with its EXIF orientation, refusing oversized images from
-/// the header alone.
-pub fn image(kind: Kind, bytes: &[u8]) -> Result<Page, Error> {
+/// the header alone. Animations are read from their first frame, with a warning.
+pub fn image(kind: Kind, bytes: &[u8], warnings: &mut Vec<Warning>) -> Result<Page, Error> {
     let format = match kind {
         Kind::Png => ImageFormat::Png,
         Kind::Gif => ImageFormat::Gif,
@@ -48,10 +50,30 @@ pub fn image(kind: Kind, bytes: &[u8]) -> Result<Page, Error> {
     decoder.set_limits(limits).map_err(fail)?;
     let orientation = decoder.orientation().map_err(fail)?;
     let grey = to_grey(DynamicImage::from_decoder(decoder).map_err(fail)?);
+    if animated(kind, bytes) {
+        warnings.push(Warning::first_frame_only());
+    }
     Ok(Page {
         orientation,
         ..Page::new(1, grey)
     })
+}
+
+/// A WebP says so in its VP8X flags; a GIF has a second frame, found without decoding any.
+fn animated(kind: Kind, bytes: &[u8]) -> bool {
+    match kind {
+        Kind::Webp => {
+            bytes.get(12..16) == Some(b"VP8X") && bytes.get(20).is_some_and(|f| f & 2 != 0)
+        }
+        Kind::Gif => {
+            let mut options = gif::DecodeOptions::new();
+            options.skip_frame_decoding(true);
+            options
+                .read_info(bytes)
+                .is_ok_and(|mut gif| (0..2).all(|_| matches!(gif.next_frame_info(), Ok(Some(_)))))
+        }
+        _ => false,
+    }
 }
 
 /// `image_too_large` above 65,535 pixels per side or 120 megapixels.
@@ -119,6 +141,10 @@ mod tests {
     use super::*;
     use image::{ImageBuffer, Luma, LumaA, Rgb, Rgba};
 
+    fn image_of(kind: Kind, bytes: &[u8]) -> Result<Page, Error> {
+        image(kind, bytes, &mut vec![])
+    }
+
     fn encode(img: impl Into<DynamicImage>, format: ImageFormat) -> Vec<u8> {
         let mut bytes = Cursor::new(vec![]);
         img.into().write_to(&mut bytes, format).unwrap();
@@ -129,7 +155,7 @@ mod tests {
     fn composites_alpha_over_white() {
         let img = ImageBuffer::from_vec(3, 1, vec![0, 255, 0, 0, 0, 128]).unwrap();
         let img: ImageBuffer<LumaA<u8>, _> = img;
-        let out = image(Kind::Png, &encode(img, ImageFormat::Png))
+        let out = image_of(Kind::Png, &encode(img, ImageFormat::Png))
             .unwrap()
             .grey;
         assert_eq!(out.as_raw(), &[0, 255, 127]);
@@ -139,7 +165,7 @@ mod tests {
     fn weighs_colours_as_rec_601() {
         let img: ImageBuffer<Rgb<u8>, _> =
             ImageBuffer::from_vec(3, 1, vec![255, 0, 0, 0, 255, 0, 0, 0, 255]).unwrap();
-        let out = image(Kind::Bmp, &encode(img, ImageFormat::Bmp))
+        let out = image_of(Kind::Bmp, &encode(img, ImageFormat::Bmp))
             .unwrap()
             .grey;
         assert_eq!(out.as_raw(), &[76, 150, 29]);
@@ -148,14 +174,14 @@ mod tests {
     #[test]
     fn scales_16_bit_samples_to_8() {
         let img: ImageBuffer<Luma<u16>, _> = ImageBuffer::from_vec(2, 1, vec![0, 65535]).unwrap();
-        let out = image(Kind::Png, &encode(img, ImageFormat::Png))
+        let out = image_of(Kind::Png, &encode(img, ImageFormat::Png))
             .unwrap()
             .grey;
         assert_eq!(out.as_raw(), &[0, 255]);
         let img: ImageBuffer<Rgba<u16>, _> =
             ImageBuffer::from_vec(1, 1, vec![65535, 65535, 65535, 0]).unwrap();
         assert_eq!(
-            image(Kind::Png, &encode(img, ImageFormat::Png))
+            image_of(Kind::Png, &encode(img, ImageFormat::Png))
                 .unwrap()
                 .grey
                 .as_raw(),
@@ -172,24 +198,27 @@ mod tests {
             b[22..26].copy_from_slice(&h.to_le_bytes());
             b
         };
-        let e = image(Kind::Bmp, &with_size(70_000, 2)).unwrap_err();
+        let e = image_of(Kind::Bmp, &with_size(70_000, 2)).unwrap_err();
         assert_eq!(e.code, "image_too_large");
         assert_eq!(
             e.message,
             "The image is 70000x2 pixels; the limit is 120 megapixels and 65,535 pixels per side."
         );
         assert_eq!(e.hint, Some("Crop or resize it first."));
-        let e = image(Kind::Bmp, &with_size(11_000, 11_000)).unwrap_err();
+        let e = image_of(Kind::Bmp, &with_size(11_000, 11_000)).unwrap_err();
         assert_eq!(e.code, "image_too_large");
         let wide = encode(GrayImage::new(65_536, 1), ImageFormat::Png);
-        assert_eq!(image(Kind::Png, &wide).unwrap_err().code, "image_too_large");
+        assert_eq!(
+            image_of(Kind::Png, &wide).unwrap_err().code,
+            "image_too_large"
+        );
         assert!(check_size(65_535, 1_831).is_ok());
     }
 
     #[test]
     fn reports_the_decoder_message_for_a_damaged_file() {
         let png = encode(GrayImage::new(64, 64), ImageFormat::Png);
-        let e = image(Kind::Png, &png[..png.len() / 2]).unwrap_err();
+        let e = image_of(Kind::Png, &png[..png.len() / 2]).unwrap_err();
         assert_eq!(e.code, "corrupt_image");
         assert!(
             e.message.starts_with("Can't decode this PNG file: "),
@@ -256,7 +285,7 @@ mod tests {
             cmyk_jpeg(&img),
         ];
         for jpeg in jpegs {
-            let out = image(Kind::Jpeg, &jpeg).unwrap().grey;
+            let out = image_of(Kind::Jpeg, &jpeg).unwrap().grey;
             assert_eq!(out.dimensions(), (64, 32));
             assert!(
                 out[(4, 16)].0[0] < 30 && out[(60, 16)].0[0] > 225,
@@ -272,10 +301,10 @@ mod tests {
         let sof = jpeg.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
         jpeg[sof + 5..sof + 9].copy_from_slice(&[0x4E, 0x20, 0x4E, 0x20]);
         assert_eq!(
-            image(Kind::Jpeg, &jpeg).unwrap_err().message,
+            image_of(Kind::Jpeg, &jpeg).unwrap_err().message,
             "The image is 20000x20000 pixels; the limit is 120 megapixels and 65,535 pixels per side."
         );
-        let e = image(Kind::Jpeg, b"\xFF\xD8\xFF\xC0\0\x02").unwrap_err();
+        let e = image_of(Kind::Jpeg, b"\xFF\xD8\xFF\xC0\0\x02").unwrap_err();
         assert!(
             e.message.starts_with("Can't decode this JPEG file: "),
             "{}",

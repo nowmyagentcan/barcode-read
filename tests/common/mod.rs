@@ -34,7 +34,7 @@ pub fn encode(img: impl Into<DynamicImage>, format: ImageFormat) -> Vec<u8> {
 
 /// Reads a file's bytes as the tool does: the type from the bytes, then grey, then the passes.
 pub fn read(bytes: &[u8], options: &Options) -> Found {
-    let page = raster::image(input::sniff(bytes).unwrap(), bytes).unwrap();
+    let page = raster::image(input::sniff(bytes).unwrap(), bytes, &mut vec![]).unwrap();
     find_codes(&page, options).unwrap()
 }
 

@@ -226,7 +226,7 @@ fn reports_an_exif_turned_photo_as_displayed() {
     let shown = Page::new(1, imageops::rotate90(&stored));
     let expected = &find_codes(&shown, &Options::default()).unwrap().codes[0];
     for (kind, bytes) in [(Kind::Jpeg, jpeg), (Kind::Png, png), (Kind::Webp, webp)] {
-        let page = raster::image(kind, &bytes).unwrap();
+        let page = raster::image(kind, &bytes, &mut vec![]).unwrap();
         assert_eq!(page.orientation, Orientation::Rotate90, "{kind:?}");
         assert_eq!(page.size(), (200, 300));
         let c = &find_codes(&page, &Options::default()).unwrap().codes[0];
@@ -268,4 +268,78 @@ fn pgm(img: &GrayImage) -> Vec<u8> {
         PnmEncoder::new(&mut bytes).with_subtype(PnmSubtype::Graymap(SampleEncoding::Binary));
     img.write_with_encoder(encoder).unwrap();
     bytes
+}
+
+/// A two-frame animation in each format, "first" then "second": only frame 1 is read.
+#[test]
+fn reads_the_first_frame_of_an_animation() {
+    use image::codecs::gif::GifEncoder;
+    use image::{Delay, Frame};
+    let frames = ["first", "second"]
+        .map(|t| image::DynamicImage::ImageLuma8(code(QRCode, t, "")).into_rgba8());
+    let mut gif = vec![];
+    GifEncoder::new(&mut gif)
+        .encode_frames(
+            frames
+                .iter()
+                .map(|f| Frame::from_parts(f.clone(), 0, 0, Delay::from_numer_denom_ms(100, 1))),
+        )
+        .unwrap();
+    let webp = animated_webp(&frames.clone().map(|f| encode(f, ImageFormat::WebP)));
+    for (kind, bytes) in [(Kind::Gif, gif), (Kind::Webp, webp)] {
+        let mut warnings = vec![];
+        let page = raster::image(kind, &bytes, &mut warnings).unwrap();
+        let codes = find_codes(&page, &Options::default()).unwrap().codes;
+        assert_eq!(codes[0].text, "first", "{kind:?}");
+        assert_eq!(warnings, [barcode_read::error::Warning::first_frame_only()]);
+    }
+    let mut warnings = vec![];
+    raster::image(
+        Kind::Gif,
+        &encode(frames[0].clone(), ImageFormat::Gif),
+        &mut warnings,
+    )
+    .unwrap();
+    raster::image(
+        Kind::Webp,
+        &encode(frames[0].clone(), ImageFormat::WebP),
+        &mut warnings,
+    )
+    .unwrap();
+    assert!(warnings.is_empty());
+}
+
+/// An animated WebP whose frames are the image data of still lossless WebPs of one size.
+fn animated_webp(stills: &[Vec<u8>]) -> Vec<u8> {
+    let chunk = |name: &[u8], data: &[u8]| {
+        let mut out = [name, &(data.len() as u32).to_le_bytes(), data].concat();
+        if data.len() % 2 == 1 {
+            out.push(0);
+        }
+        out
+    };
+    // A lossless still's VP8L header packs width - 1 and height - 1 into 14 bits each.
+    let bits = u32::from_le_bytes(stills[0][21..25].try_into().unwrap());
+    let (w1, h1) = (bits & 0x3FFF, (bits >> 14) & 0x3FFF);
+    let u24 = |v: u32| v.to_le_bytes()[..3].to_vec();
+    let mut body = b"WEBP".to_vec();
+    body.extend(chunk(
+        b"VP8X",
+        &[[2, 0, 0, 0].as_slice(), &u24(w1), &u24(h1)].concat(),
+    ));
+    body.extend(chunk(b"ANIM", &[255, 255, 255, 255, 0, 0]));
+    for still in stills {
+        let frame = [
+            u24(0),
+            u24(0),
+            u24(w1),
+            u24(h1),
+            u24(100),
+            vec![0],
+            still[12..].to_vec(),
+        ]
+        .concat();
+        body.extend(chunk(b"ANMF", &frame));
+    }
+    chunk(b"RIFF", &body)
 }

@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 base64 = "0.23"
+gif = "0.14"
 image = { version = "0.25.10", default-features = false, features = ["png", "gif", "bmp", "webp", "pnm"] }
 zune-jpeg = "0.5.15"
 zxing-cpp = { version = "0.5.3", features = ["bundled"] }

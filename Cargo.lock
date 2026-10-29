@@ -52,6 +52,7 @@ name = "barcode-read"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "gif",
  "image",
  "zune-jpeg",
  "zxing-cpp",
