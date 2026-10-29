@@ -40,15 +40,15 @@ fn cli(args: &[&str], found: usize) {
     );
 }
 
-/// A grey photo-like picture: soft shading with mild sensor noise (8 levels).
-fn photo(width: u32, height: u32) -> GrayImage {
+/// A grey photo-like picture: soft shading with sensor noise of `noise` levels.
+fn photo(width: u32, height: u32, noise: u32) -> GrayImage {
     let mut seed = 0x2545_f491_u32;
     GrayImage::from_fn(width, height, |x, y| {
         seed ^= seed << 13;
         seed ^= seed >> 17;
         seed ^= seed << 5;
         let shade = 90 + (x * 80 / width + y * 60 / height) as u8;
-        Luma([shade + (seed % 8) as u8])
+        Luma([shade + (seed % noise) as u8])
     })
 }
 
@@ -116,10 +116,10 @@ fn meets_the_speed_targets() {
     let file = |name: &str| dir.join(name).to_str().unwrap().to_owned();
     let qr_png = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/qr.png");
 
-    let mut big = photo(8000, 6000);
+    let mut big = photo(8000, 6000, 8);
     imageops::overlay(&mut big, &qr("48 megapixels", 2), 5200, 3900);
     fs::write(file("48mp.jpg"), jpeg(&big)).unwrap();
-    fs::write(file("12mp.jpg"), jpeg(&photo(4000, 3000))).unwrap();
+    fs::write(file("12mp.jpg"), jpeg(&photo(4000, 3000, 8))).unwrap();
     let page = (595.0, 842.0, vector_qr("a4 page", 72.0, 72.0, 4.0, 842.0));
     fs::write(file("a4.pdf"), pdf_file(&[page], "")).unwrap();
     let scans: Vec<_> = (1..=20)
@@ -245,4 +245,20 @@ fn meets_the_speed_targets() {
         .filter(|(_, time, target)| time > target)
         .collect();
     assert!(slow.is_empty(), "slower than the target: {slow:?}");
+}
+
+#[test]
+#[ignore = "known bug: QA-06"]
+fn reads_a_noisy_48_mp_photo_in_time() {
+    let mut big = photo(8000, 6000, 24);
+    imageops::overlay(&mut big, &qr("noisy", 2), 5200, 3900);
+    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("noisy-48mp.jpg");
+    fs::write(&path, jpeg(&big)).unwrap();
+    let start = Instant::now();
+    cli(&[path.to_str().unwrap()], 1);
+    assert!(
+        start.elapsed() <= Duration::from_millis(1500),
+        "{:?}",
+        start.elapsed()
+    );
 }
