@@ -25,6 +25,33 @@ pub struct Options {
     pub password: Option<String>,
 }
 
+impl Options {
+    /// Options from the values people and agents type (`--formats`, `--pages`, ...), or the
+    /// usage error the first bad one gives.
+    pub fn parse(
+        formats: Option<&str>,
+        pages: Option<&str>,
+        dpi: Option<u32>,
+        password: Option<String>,
+        fast: bool,
+    ) -> Result<Self, error::Error> {
+        Ok(Self {
+            formats: formats
+                .map(decode::parse_formats)
+                .transpose()?
+                .unwrap_or_default(),
+            fast,
+            dpi: match dpi {
+                None => 300,
+                Some(dpi) if (72..=1200).contains(&dpi) => dpi,
+                Some(_) => return Err(error::Error::bad_dpi()),
+            },
+            pages: pages.map(input::PageList::parse).transpose()?,
+            password,
+        })
+    }
+}
+
 impl Default for Options {
     fn default() -> Self {
         Self {

@@ -2,12 +2,13 @@
 
 use std::fmt::Display;
 
+use schemars::JsonSchema;
 use serde::Serialize;
 
 const USE_SUPPORTED: &str = "Use PNG, JPEG, GIF, BMP, WebP, TIFF, PNM or PDF.";
 
 /// A file, usage or runtime error: a stable `code`, a sentence for people and an optional fix.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Error {
     pub code: &'static str,
     pub message: String,
@@ -199,6 +200,11 @@ impl Error {
         )
     }
 
+    /// MCP arguments or a page request that can't be read.
+    pub fn bad_request(message: impl Into<String>) -> Self {
+        Self::new("bad_request", message, None)
+    }
+
     pub fn port_in_use(port: u16) -> Self {
         Self::new(
             "port_in_use",
@@ -217,7 +223,7 @@ impl Error {
 }
 
 /// A note about a file that was still read.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Warning {
     pub code: &'static str,
     pub message: String,

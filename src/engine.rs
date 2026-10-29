@@ -8,6 +8,7 @@ use std::sync::Once;
 use std::thread;
 use std::time::Duration;
 
+use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::decode::{Code, Page, find_codes};
@@ -20,7 +21,7 @@ const WORKER: &str = "reader";
 const WORKER_STACK: usize = 64 << 20;
 
 /// What reading one file gave; it serialises as one entry of the JSON `files` list.
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Serialize, JsonSchema)]
 pub struct FileResult {
     pub path: String,
     /// `None` when the file couldn't be identified.
@@ -34,7 +35,7 @@ pub struct FileResult {
 }
 
 /// A page that was read, at its displayed size.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct PageInfo {
     pub page: usize,
     pub width: u32,
@@ -49,7 +50,7 @@ pub struct PageInfo {
 
 /// The JSON result of a run: every file, the codes found in all of them, and the files that
 /// failed.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct Report<'a> {
     pub files: &'a [FileResult],
     pub found: usize,

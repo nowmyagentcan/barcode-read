@@ -5,6 +5,7 @@ use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
+use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::error::{Error, Unsupported, Warning};
@@ -127,7 +128,7 @@ impl Input {
 }
 
 /// A readable input type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     Pdf,

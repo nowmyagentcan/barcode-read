@@ -1,6 +1,7 @@
 //! The command line: `barcode-read [read] <PATH>... [OPTIONS]`.
 
 mod interactive;
+mod mcp;
 mod text;
 
 use std::ffi::OsString;
@@ -9,10 +10,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
+use barcode_read::Options;
 use barcode_read::engine::{self, Failure, Report};
 use barcode_read::error::Error;
-use barcode_read::input::{self, PageList};
-use barcode_read::{Options, decode};
+use barcode_read::input;
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser};
 use text::{Look, Out};
 use zxingcpp::{BarcodeFormat, BarcodeFormats};
@@ -24,6 +25,7 @@ const HELP: &str = "\
 
 Commands:
   read  Read codes from files and folders (the default command)
+  mcp   Run the MCP server on stdio
 
 Options:
 {options}{after-help}";
@@ -36,6 +38,16 @@ Examples:
   barcode-read invoice.pdf --dpi 600
   cat code.png | barcode-read -
   barcode-read ui";
+
+/// `barcode-read mcp`
+#[derive(Parser)]
+#[command(
+    name = "barcode-read mcp",
+    about = "Run the MCP server on stdio.",
+    after_help = EXAMPLES,
+    disable_version_flag = true
+)]
+struct Mcp {}
 
 #[derive(Parser, Default)]
 #[command(
@@ -85,26 +97,17 @@ struct Cli {
 impl Cli {
     /// The reading options, or the usage error a value gives.
     fn options(&self) -> Result<Options, Error> {
-        let dpi = match &self.dpi {
-            None => 300,
-            Some(dpi) => dpi
-                .parse()
-                .ok()
-                .filter(|dpi| (72..=1200).contains(dpi))
-                .ok_or_else(Error::bad_dpi)?,
-        };
-        Ok(Options {
-            formats: self
-                .formats
-                .as_deref()
-                .map(decode::parse_formats)
-                .transpose()?
-                .unwrap_or_default(),
-            fast: self.fast,
-            dpi,
-            pages: self.pages.as_deref().map(PageList::parse).transpose()?,
-            password: self.password.clone(),
-        })
+        let dpi = self
+            .dpi
+            .as_deref()
+            .map(|d| d.parse().map_err(|_| Error::bad_dpi()));
+        Options::parse(
+            self.formats.as_deref(),
+            self.pages.as_deref(),
+            dpi.transpose()?,
+            self.password.clone(),
+            self.fast,
+        )
     }
 }
 
@@ -112,8 +115,13 @@ fn main() -> ExitCode {
     let mut args: Vec<OsString> = std::env::args_os().collect();
     let bare = args.len() == 1;
     // Only an exact first argument is a command: `./read` is a file.
-    if args.get(1).is_some_and(|a| a == "read") {
-        args.remove(1);
+    match args.get(1).and_then(|a| a.to_str()) {
+        Some("read") => drop(args.remove(1)),
+        Some("mcp") => {
+            Mcp::parse_from(&args[1..]);
+            return served(mcp::serve());
+        }
+        _ => {}
     }
     let json = args
         .iter()
@@ -126,16 +134,16 @@ fn main() -> ExitCode {
         .and_then(|m| Cli::from_arg_matches(&m));
     let cli = match parsed {
         Ok(cli) => cli,
-        Err(e) if json && e.use_stderr() => return usage(&Error::usage(clap_message(&e)), true),
+        Err(e) if json && e.use_stderr() => return fail(&Error::usage(clap_message(&e)), true),
         Err(e) => e.exit(),
     };
     let options = match cli.options() {
         Ok(options) => options,
-        Err(e) => return usage(&e, cli.json),
+        Err(e) => return fail(&e, cli.json),
     };
     let interactive = bare && io::stdin().is_terminal() && io::stdout().is_terminal();
     if cli.paths.is_empty() && !interactive {
-        return usage(&Error::no_input(), cli.json);
+        return fail(&Error::no_input(), cli.json);
     }
     let mut out = Out::new(io::stdout().lock(), Look::stdout());
     let mut err = Out::new(io::stderr(), Look::stderr());
@@ -202,8 +210,14 @@ fn read(
     Ok(report.exit_code())
 }
 
-/// Reports a usage error, as two lines on stderr or as JSON on stdout, and exits 2.
-fn usage(e: &Error, json: bool) -> ExitCode {
+/// How a server command ended: quietly, or with its error on stderr.
+fn served(result: Result<(), Error>) -> ExitCode {
+    result.map_or_else(|e| fail(&e, false), |()| ExitCode::SUCCESS)
+}
+
+/// Reports an error that stops the run, as two lines on stderr or as JSON on stdout, and
+/// exits with its code.
+fn fail(e: &Error, json: bool) -> ExitCode {
     let _ = if json {
         let failure = serde_json::to_string(&Failure { error: e }).expect("plain strings");
         writeln!(io::stdout(), "{failure}")
@@ -214,7 +228,7 @@ fn usage(e: &Error, json: bool) -> ExitCode {
             e.hint,
         )
     };
-    ExitCode::from(2)
+    ExitCode::from(e.exit_code())
 }
 
 /// clap's message as a sentence: "unexpected argument '--x' found" -> "Unexpected argument
