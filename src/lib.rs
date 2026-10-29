@@ -4,3 +4,4 @@ pub mod decode;
 pub mod error;
 pub mod input;
 pub mod raster;
+pub mod tiff;

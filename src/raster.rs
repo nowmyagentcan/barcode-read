@@ -84,7 +84,7 @@ pub fn check_size(width: u64, height: u64) -> Result<(), Error> {
     Ok(())
 }
 
-fn to_grey(img: DynamicImage) -> GrayImage {
+pub(crate) fn to_grey(img: DynamicImage) -> GrayImage {
     match img {
         DynamicImage::ImageLuma8(grey) => grey,
         DynamicImage::ImageLumaA8(img) => luma(&img),
