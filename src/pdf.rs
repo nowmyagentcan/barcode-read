@@ -266,7 +266,7 @@ fn whole(s: &Stream) -> bool {
 fn inflates(data: &[u8]) -> bool {
     let header = u16::from_be_bytes([data[0], *data.get(1).unwrap_or(&0)]);
     let zlib = header & 0x0F00 == 0x0800 && header.is_multiple_of(31);
-    let data = &data[if zlib { 2 } else { 0 }..];
+    let data = data.get(if zlib { 2 } else { 0 }..).unwrap_or_default();
     let (mut inflate, mut out) = (Decompress::new(false), vec![0; 1 << 16]);
     loop {
         let (i, o) = (inflate.total_in(), inflate.total_out());
@@ -346,5 +346,11 @@ mod tests {
         let e = pages(bytes, &Options::default(), &mut vec![], |_| ()).unwrap_err();
         assert_eq!(e.code, "corrupt_pdf");
         assert_eq!(e.hint, Some("The file may be damaged."));
+    }
+
+    #[test]
+    fn a_lone_zlib_header_byte_is_not_whole() {
+        // 0xF8 padded with 0 passes the zlib header test, though no header byte follows.
+        assert!(!inflates(&[0xF8]));
     }
 }
