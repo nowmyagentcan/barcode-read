@@ -150,7 +150,6 @@ fn page_ends_each_run_cleanly_and_shows_a_bad_dpi() {
 }
 
 #[test]
-#[ignore = "known bug: R2-05"]
 fn page_refuses_a_dpi_of_zero() {
     assert_eq!(
         page_runs()["zero"],

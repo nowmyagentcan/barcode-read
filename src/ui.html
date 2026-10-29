@@ -213,7 +213,7 @@ form.addEventListener("submit", async ev => {
     return;
   }
   // The browser can't point at a field inside closed Options, so the result says what's wrong.
-  const dpi = Number($("#dpi").value) || 300;
+  const typed = $("#dpi").value.trim(), dpi = typed === "" ? 300 : Number(typed);
   if (!Number.isInteger(dpi) || dpi < 72 || dpi > 1200) {
     $("details").open = true;
     out.replaceChildren();
