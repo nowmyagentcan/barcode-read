@@ -9,7 +9,12 @@ publish = false
 
 [dependencies]
 image = { version = "0.25.10", default-features = false, features = ["png", "gif", "bmp", "webp", "pnm"] }
+zune-jpeg = "0.5.15"
 zxing-cpp = { version = "0.5.3", features = ["bundled"] }
+
+[dev-dependencies]
+# Tests write JPEG inputs; the feature stays out of the shipped binary.
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 
 [profile.release]
 lto = true

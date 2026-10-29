@@ -1,10 +1,14 @@
-//! Single images to 8-bit grey: PNG, GIF, BMP, WebP and PNM through `image`.
+//! Single images to 8-bit grey: JPEG with zune-jpeg; PNG, GIF, BMP, WebP and PNM with `image`.
 
 use std::io::Cursor;
 
 use image::{
     DynamicImage, GrayImage, ImageBuffer, ImageDecoder, ImageFormat, ImageReader, Limits, Pixel,
+    RgbImage,
 };
+
+use zune_jpeg::JpegDecoder;
+use zune_jpeg::zune_core::{bytestream::ZCursor, colorspace::ColorSpace, options::DecoderOptions};
 
 use crate::{error::Error, input::Kind};
 
@@ -19,7 +23,8 @@ pub fn grey(kind: Kind, bytes: &[u8]) -> Result<GrayImage, Error> {
         Kind::Bmp => ImageFormat::Bmp,
         Kind::Webp => ImageFormat::WebP,
         Kind::Pnm => ImageFormat::Pnm,
-        Kind::Jpeg | Kind::Tiff | Kind::Pdf => unreachable!("{} isn't read here", kind.name()),
+        Kind::Jpeg => return jpeg(bytes),
+        Kind::Tiff | Kind::Pdf => unreachable!("{} isn't read here", kind.name()),
     };
     let fail = |e| Error::corrupt_image(kind.label(), e);
     // Our own size check runs first, so an oversized image is reported with its size. The BMP
@@ -60,6 +65,29 @@ fn to_grey(img: DynamicImage) -> GrayImage {
         img @ DynamicImage::ImageLuma16(_) => img.into_luma8(),
         img => luma(&img.into_rgba8()),
     }
+}
+
+/// JPEG straight to grey with zune-jpeg; CMYK, YCCK and RGB JPEGs go through RGB first.
+fn jpeg(bytes: &[u8]) -> Result<GrayImage, Error> {
+    let fail = |e| Error::corrupt_image("JPEG", e);
+    let options = DecoderOptions::default()
+        .set_max_width(65_535)
+        .set_max_height(65_535);
+    let mut decoder = JpegDecoder::new_with_options(ZCursor::new(bytes), options);
+    decoder.decode_headers().map_err(fail)?;
+    let (width, height) = decoder.dimensions().expect("headers are decoded");
+    check_size(width as u64, height as u64)?;
+    let (width, height) = (width as u32, height as u32);
+    if matches!(
+        decoder.input_colorspace(),
+        Some(ColorSpace::YCbCr | ColorSpace::Luma)
+    ) {
+        decoder.set_options(options.jpeg_set_out_colorspace(ColorSpace::Luma));
+        let pixels = decoder.decode().map_err(fail)?;
+        return Ok(GrayImage::from_vec(width, height, pixels).expect("one byte per pixel"));
+    }
+    let rgb = RgbImage::from_vec(width, height, decoder.decode().map_err(fail)?);
+    Ok(luma(&rgb.expect("three bytes per pixel")))
 }
 
 /// Rec. 601 luma as zxing-cpp computes it, with any alpha composited over white.
@@ -149,5 +177,88 @@ mod tests {
         );
         assert!(e.message.ends_with('.') && !e.message.ends_with(".."));
         assert_eq!(e.hint, Some("The file may be damaged or cut short."));
+    }
+
+    /// The segments before the scan, then the scan header with its data but not the end marker.
+    fn segments(jpeg: &[u8]) -> Vec<&[u8]> {
+        let (mut out, mut at) = (vec![], 2);
+        while jpeg[at + 1] != 0xDA {
+            let end = at + 2 + usize::from(u16::from_be_bytes([jpeg[at + 2], jpeg[at + 3]]));
+            out.push(&jpeg[at..end]);
+            at = end;
+        }
+        out.push(&jpeg[at..jpeg.len() - 2]);
+        out
+    }
+
+    /// An Adobe CMYK JPEG (inverted samples, as Photoshop writes them) whose black plane is
+    /// `img`: the scans of four greyscale JPEGs under one four-component frame.
+    fn cmyk_jpeg(img: &GrayImage) -> Vec<u8> {
+        let paper = GrayImage::from_pixel(img.width(), img.height(), Luma([255]));
+        let planes = [&paper, &paper, &paper, img].map(|p| encode(p.clone(), ImageFormat::Jpeg));
+        let mut out = b"\xFF\xD8\xFF\xEE\0\x0EAdobe\0\x64\0\0\0\0\0".to_vec();
+        for table in segments(&planes[0])
+            .iter()
+            .filter(|s| matches!(s[1], 0xDB | 0xC4))
+        {
+            out.extend_from_slice(table);
+        }
+        let (w, h) = (img.width() as u16, img.height() as u16);
+        out.extend(
+            [
+                [0xFF, 0xC0, 0, 20, 8].as_slice(),
+                &h.to_be_bytes(),
+                &w.to_be_bytes(),
+                &[4],
+            ]
+            .concat(),
+        );
+        for id in 1..=4 {
+            out.extend([id, 0x11, 0]);
+        }
+        for (id, plane) in (1..=4).zip(&planes) {
+            let mut scan = segments(plane).pop().unwrap().to_vec();
+            scan[5] = id;
+            out.extend(scan);
+        }
+        out.extend([0xFF, 0xD9]);
+        out
+    }
+
+    #[test]
+    fn reads_grey_colour_and_cmyk_jpegs() {
+        let img = GrayImage::from_fn(64, 32, |x, _| Luma([if x < 32 { 0 } else { 255 }]));
+        let rgb = DynamicImage::ImageLuma8(img.clone()).into_rgb8();
+        let jpegs = [
+            encode(img.clone(), ImageFormat::Jpeg),
+            encode(rgb, ImageFormat::Jpeg),
+            cmyk_jpeg(&img),
+        ];
+        for jpeg in jpegs {
+            let out = grey(Kind::Jpeg, &jpeg).unwrap();
+            assert_eq!(out.dimensions(), (64, 32));
+            assert!(
+                out[(4, 16)].0[0] < 30 && out[(60, 16)].0[0] > 225,
+                "{:?}",
+                out[(60, 16)]
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_oversized_or_broken_jpegs() {
+        let mut jpeg = encode(GrayImage::new(8, 8), ImageFormat::Jpeg);
+        let sof = jpeg.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
+        jpeg[sof + 5..sof + 9].copy_from_slice(&[0x4E, 0x20, 0x4E, 0x20]);
+        assert_eq!(
+            grey(Kind::Jpeg, &jpeg).unwrap_err().message,
+            "The image is 20000x20000 pixels; the limit is 120 megapixels and 65,535 pixels per side."
+        );
+        let e = grey(Kind::Jpeg, b"\xFF\xD8\xFF\xC0\0\x02").unwrap_err();
+        assert!(
+            e.message.starts_with("Can't decode this JPEG file: "),
+            "{}",
+            e.message
+        );
     }
 }
