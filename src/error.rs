@@ -30,7 +30,7 @@ pub enum Unsupported {
 }
 
 impl Error {
-    fn new(code: &'static str, message: impl Into<String>, hint: Option<&'static str>) -> Self {
+    pub fn new(code: &'static str, message: impl Into<String>, hint: Option<&'static str>) -> Self {
         Self {
             code,
             message: message.into(),

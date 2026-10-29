@@ -3,6 +3,7 @@
 mod interactive;
 mod mcp;
 mod text;
+mod ui;
 
 use std::ffi::OsString;
 use std::io::{self, IsTerminal, Write};
@@ -25,6 +26,7 @@ const HELP: &str = "\
 
 Commands:
   read  Read codes from files and folders (the default command)
+  ui    Open the local web page
   mcp   Run the MCP server on stdio
 
 Options:
@@ -38,6 +40,23 @@ Examples:
   barcode-read invoice.pdf --dpi 600
   cat code.png | barcode-read -
   barcode-read ui";
+
+/// `barcode-read ui`
+#[derive(Parser)]
+#[command(
+    name = "barcode-read ui",
+    about = "Open the local web page.",
+    after_help = EXAMPLES,
+    disable_version_flag = true
+)]
+struct Ui {
+    /// port to listen on [default: a free one]
+    #[arg(long, value_name = "N", default_value_t = 0, hide_default_value = true)]
+    port: u16,
+    /// don't open the browser
+    #[arg(long)]
+    no_open: bool,
+}
 
 /// `barcode-read mcp`
 #[derive(Parser)]
@@ -117,6 +136,10 @@ fn main() -> ExitCode {
     // Only an exact first argument is a command: `./read` is a file.
     match args.get(1).and_then(|a| a.to_str()) {
         Some("read") => drop(args.remove(1)),
+        Some("ui") => {
+            let ui = Ui::parse_from(&args[1..]);
+            return served(ui::serve(ui.port, !ui.no_open, "  (Ctrl+C to stop)"));
+        }
         Some("mcp") => {
             Mcp::parse_from(&args[1..]);
             return served(mcp::serve());
