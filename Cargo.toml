@@ -10,6 +10,8 @@ publish = false
 [dependencies]
 base64 = "0.23"
 clap = { version = "4.6", features = ["derive"] }
+# Checks that a PDF stream's Flate data is whole (flate2 is already in the graph through hayro).
+flate2 = "1.1.10"
 gif = "0.14"
 # No bundled fonts or CMaps: codes are never drawn in the standard fonts or as CJK text.
 hayro = { version = "0.8.0", default-features = false, features = ["simd"] }

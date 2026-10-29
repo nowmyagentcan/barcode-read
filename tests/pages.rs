@@ -382,7 +382,6 @@ fn a_scanned_page_whose_image_cant_be_decoded_fails() {
 }
 
 #[test]
-#[ignore = "known bug: R3-08"]
 fn a_pdf_with_no_pages_is_an_error() {
     let catalog = "<< /Type /Catalog /Pages 2 0 R >>".to_string();
     let missing = pdf_objects(
@@ -421,7 +420,6 @@ fn failed(file: &engine::FileResult) -> bool {
 const BROKEN: &str = "not deflate data";
 
 #[test]
-#[ignore = "known bug: R4-01"]
 fn a_damaged_stream_in_a_content_array_fails() {
     let qr = stream("", &vector_qr("array", 100.0, 100.0, 3.0, A4.1));
     let broken = stream("/Filter /FlateDecode", BROKEN);
@@ -439,7 +437,6 @@ fn a_damaged_stream_in_a_content_array_fails() {
 }
 
 #[test]
-#[ignore = "known bug: R4-01"]
 fn a_damaged_form_fails_the_page() {
     let form = "/Type /XObject /Subtype /Form /BBox [0 0 595 842]";
     let page = "/Contents 4 0 R /Resources << /XObject << /F 5 0 R >> >>";
@@ -456,7 +453,6 @@ fn a_damaged_form_fails_the_page() {
 }
 
 #[test]
-#[ignore = "known bug: R4-01"]
 fn a_scanned_page_whose_image_is_cut_short_fails() {
     // Page 1's JPEG, page 2's Flate and page 3's Group 4 image each cut to half inside an
     // intact file, as image-to-PDF tools copy a cut-short image: spaces keep every offset.
@@ -491,7 +487,6 @@ fn a_scanned_page_whose_image_is_cut_short_fails() {
 }
 
 #[test]
-#[ignore = "known bug: R4-02"]
 fn empty_or_null_content_is_a_blank_page() {
     // zlib's output for no data, so a valid Flate stream that decodes to nothing.
     let empty = stream(
@@ -519,9 +514,26 @@ fn empty_or_null_content_is_a_blank_page() {
 }
 
 #[test]
-#[ignore = "known bug: VR-05"]
 fn a_content_stream_with_an_unknown_filter_fails() {
     let content = stream("/Filter /NoSuchFilter", BROKEN);
     let file = one_page("/Contents 4 0 R", &[content]);
     assert!(failed(&file), "{:?}", file.warnings);
+}
+
+#[test]
+fn a_lost_annotation_appearance_fails_the_page() {
+    let form = "/Type /XObject /Subtype /Form /BBox [0 0 595 842]";
+    let stamp = |ap: &str| {
+        format!("<< /Type /Annot /Subtype /Stamp /Rect [0 0 595 842] /F 4 /AP << /N {ap} >> >>")
+    };
+    let page = "/Contents 4 0 R /Annots [5 0 R]";
+    let damaged = stream(&format!("{form} /Filter /FlateDecode"), BROKEN);
+    for (name, ap) in [
+        ("missing", "9 0 R"),
+        ("damaged", "6 0 R"),
+        ("missing state", "<< /Off 9 0 R >>"),
+    ] {
+        let file = one_page(page, &[stream("", ""), stamp(ap), damaged.clone()]);
+        assert!(failed(&file), "{name}: {:?}", file.warnings);
+    }
 }

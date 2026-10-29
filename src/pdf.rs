@@ -1,14 +1,18 @@
 //! PDF pages rendered to grey with hayro, one page in memory at a time.
 
+use std::collections::HashSet;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use flate2::{Decompress, FlushDecompress, Status};
 use hayro::hayro_interpret::{InterpreterSettings, InterpreterWarning};
+use hayro::hayro_syntax::content::TypedIter;
 use hayro::hayro_syntax::content::ops::TypedInstruction;
-use hayro::hayro_syntax::object::Stream;
-use hayro::hayro_syntax::page::Page as PdfPage;
-use hayro::hayro_syntax::{DecryptionError, LoadPdfError, Pdf};
+use hayro::hayro_syntax::object::stream::ImageDecodeParams;
+use hayro::hayro_syntax::object::{Array, Dict, Name, Object, ObjectIdentifier, Stream};
+use hayro::hayro_syntax::page::{Page as PdfPage, Resources};
+use hayro::hayro_syntax::{DecryptionError, Filter, LoadPdfError, Pdf};
 use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::{PixmapSettings, RenderCache, RenderSettings, render};
 use image::{GrayImage, ImageBuffer, Rgba};
@@ -75,8 +79,14 @@ pub fn pages(
             }
         }
     }
-    if failed && !rendered {
-        return Err(Error::corrupt_pdf("no page could be rendered"));
+    if !rendered {
+        // Every selected page fails or renders, so none failing means none was selected.
+        let cause = if failed {
+            "no page could be rendered"
+        } else {
+            "it has no pages"
+        };
+        return Err(Error::corrupt_pdf(cause));
     }
     Ok(())
 }
@@ -86,7 +96,7 @@ pub fn pages(
 fn fit(dpi: u32, (w, h): (f32, f32)) -> Option<u32> {
     (1..=dpi).rev().find(|&d| {
         let (pw, ph) = pixels(d, w, h);
-        pw * ph <= MAX_PIXELS && pw.max(ph) <= MAX_SIDE
+        pw.saturating_mul(ph) <= MAX_PIXELS && pw.max(ph) <= MAX_SIDE
     })
 }
 
@@ -95,26 +105,11 @@ fn pixels(dpi: u32, w: f32, h: f32) -> (u64, u64) {
     ((w * scale) as u64, (h * scale) as u64)
 }
 
-/// Renders on white and converts to grey, or `None` when content is lost: hayro leaves out a
-/// content stream or image it can't decode or find (a damaged or cut-short file) without an
-/// error, and a broken Flate or RunLength stream decodes to nothing. The colour pixmap is
-/// freed on return.
+/// Renders on white and converts to grey, or `None` when content is lost (`intact`) or an
+/// image fails to decode. The colour pixmap is freed on return.
 fn grey<'a>(page: &'a PdfPage<'a>, cache: &RenderCache<'a>, dpi: u32) -> Option<GrayImage> {
-    let raw = page.raw().get::<Stream>("Contents").map(|s| s.raw_data());
-    let lost = match page.page_stream() {
-        None => page.raw().contains_key("Contents"),
-        Some(data) => data.is_empty() && raw.is_some_and(|raw| !raw.trim_ascii().is_empty()),
-    };
-    if lost {
+    if !intact(page) {
         return None;
-    }
-    let mut ops = page.typed_operations();
-    while let Some(op) = ops.next() {
-        if let TypedInstruction::XObject(x) = op
-            && page.resources().get_x_object(x.0).is_none()
-        {
-            return None;
-        }
     }
     let scale = dpi as f32 / 72.0;
     let settings = PixmapSettings {
@@ -145,6 +140,185 @@ fn grey<'a>(page: &'a PdfPage<'a>, cache: &RenderCache<'a>, dpi: u32) -> Option<
     let (w, h) = (pixmap.width().into(), pixmap.height().into());
     let rgba = ImageBuffer::<Rgba<u8>, _>::from_raw(w, h, pixmap.data_as_u8_slice());
     Some(luma(&rgba.expect("four bytes per pixel")))
+}
+
+/// Whether everything the page draws is there and whole. hayro leaves out what it can't find
+/// or decode, and decodes damaged or cut-short data as far as it goes, without an error; this
+/// checks each /Contents stream, every XObject a `Do` names (forms followed down) and each
+/// annotation's appearance. No /Contents, or null, is a blank page.
+fn intact(page: &PdfPage) -> bool {
+    let contents = match entry(page.raw(), b"Contents") {
+        Ok(None | Some(Object::Null(_))) => vec![],
+        Ok(Some(Object::Stream(s))) => vec![s],
+        Ok(Some(Object::Array(a))) => {
+            let all: Vec<_> = a.iter::<Stream>().collect();
+            // The iterator stops at a member that is missing or isn't a stream.
+            if all.len() < a.raw_iter().count() {
+                return false;
+            }
+            all
+        }
+        _ => return false,
+    };
+    let mut seen = HashSet::new();
+    let resources = page.resources();
+    contents.iter().all(|s| whole(s) && s.decoded().is_ok())
+        && draws(page.typed_operations(), resources, &mut seen, 0)
+        && appearances(page.raw()).all(|ap| match ap {
+            Ok(Some(Object::Stream(s))) => form(&s, resources, &mut seen, 0),
+            Ok(_) => true,
+            Err(()) => false,
+        })
+}
+
+/// `dict[key]`, or `Err` when it is there but can't be read (a missing object, say).
+fn entry<'a>(dict: &Dict<'a>, key: &[u8]) -> Result<Option<Object<'a>>, ()> {
+    match dict.get::<Object>(key) {
+        None if dict.contains_key(key) => Err(()),
+        found => Ok(found),
+    }
+}
+
+/// The normal appearance hayro draws for each shown annotation: /AP /N, or its /AS or /Off state.
+fn appearances<'a>(page: &Dict<'a>) -> impl Iterator<Item = Result<Option<Object<'a>>, ()>> {
+    let annots = page.get::<Array>("Annots").into_iter();
+    annots.flat_map(|a| a.iter::<Dict>()).filter_map(|annot| {
+        let shown = annot.get::<u32>("F").unwrap_or(0) & 2 == 0;
+        let ap = annot.get::<Dict>("AP").filter(|_| shown)?;
+        Some(match entry(&ap, b"N") {
+            Ok(Some(Object::Dict(states))) => {
+                let state = annot.get::<Name>("AS");
+                entry(&states, state.as_deref().unwrap_or(b"Off"))
+            }
+            n => n,
+        })
+    })
+}
+
+/// Whether every XObject the content `ops` draws is there and whole.
+fn draws<'a>(
+    mut ops: TypedIter,
+    resources: &Resources<'a>,
+    seen: &mut HashSet<ObjectIdentifier>,
+    depth: u32,
+) -> bool {
+    while let Some(op) = ops.next() {
+        if let TypedInstruction::XObject(x) = op {
+            let Some(s) = resources.get_x_object(x.0) else {
+                return false;
+            };
+            // Each object is checked once, which also ends a form that draws itself.
+            let ok = !seen.insert(s.obj_id())
+                || match s.dict().get::<Name>("Subtype").as_deref() {
+                    Some(b"Form") => form(&s, resources, seen, depth),
+                    _ => whole(&s),
+                };
+            if !ok {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Whether a form is whole and draws only what is there, up to hayro's nesting limit.
+fn form<'a>(
+    s: &Stream<'a>,
+    parent: &Resources<'a>,
+    seen: &mut HashSet<ObjectIdentifier>,
+    depth: u32,
+) -> bool {
+    let Some(data) = s.decoded().ok().filter(|_| whole(s)) else {
+        return false;
+    };
+    let own = s.dict().get::<Dict>("Resources").map(Resources::new);
+    depth >= 50
+        || draws(
+            TypedIter::new(&data),
+            own.as_ref().unwrap_or(parent),
+            seen,
+            depth + 1,
+        )
+}
+
+/// Whether a stream's data is whole: each filter is one PDF defines, and Flate or RunLength
+/// data reaches its end, a JPEG its end marker and a fax image all its rows. Empty data is
+/// whole.
+fn whole(s: &Stream) -> bool {
+    let named = match s.dict().get::<Object>("Filter") {
+        Some(Object::Array(a)) => a.raw_iter().count(),
+        Some(_) => 1,
+        None => 0,
+    };
+    let (filters, data) = (s.filters(), s.raw_data());
+    filters.len() == named
+        && (data.trim_ascii().is_empty()
+            || match filters.as_slice() {
+                [Filter::FlateDecode, ..] => inflates(&data),
+                [Filter::RunLengthDecode, ..] => runs_to_end(&data),
+                [Filter::DctDecode] => jpeg_ends(&data),
+                [Filter::CcittFaxDecode] => all_rows(s),
+                _ => true,
+            })
+}
+
+/// Whether zlib or bare deflate data runs to its final block (readers ignore the checksum).
+fn inflates(data: &[u8]) -> bool {
+    let header = u16::from_be_bytes([data[0], *data.get(1).unwrap_or(&0)]);
+    let zlib = header & 0x0F00 == 0x0800 && header.is_multiple_of(31);
+    let data = &data[if zlib { 2 } else { 0 }..];
+    let (mut inflate, mut out) = (Decompress::new(false), vec![0; 1 << 16]);
+    loop {
+        let (i, o) = (inflate.total_in(), inflate.total_out());
+        match inflate.decompress(&data[i as usize..], &mut out, FlushDecompress::None) {
+            Ok(Status::StreamEnd) => return true,
+            Ok(_) if inflate.total_in() > i || inflate.total_out() > o => {}
+            _ => return false,
+        }
+    }
+}
+
+/// Whether RunLength data reaches its end-of-data byte.
+fn runs_to_end(data: &[u8]) -> bool {
+    let mut at = 0;
+    while let Some(&n) = data.get(at) {
+        match n {
+            128 => return true,
+            0..128 => at += usize::from(n) + 2,
+            _ => at += 2,
+        }
+    }
+    false
+}
+
+/// Whether a fax image decodes to all the rows its dictionary gives.
+fn all_rows(s: &Stream) -> bool {
+    let size = |key| s.dict().get::<u32>(key).unwrap_or(0);
+    let params = ImageDecodeParams {
+        width: size("Width"),
+        height: size("Height"),
+        ..ImageDecodeParams::default()
+    };
+    s.decoded_image(&params).is_ok_and(|r| {
+        let size = r
+            .image_data
+            .map(|i| u64::from(i.width) * u64::from(i.height));
+        size.is_none_or(|size| r.data.len() as u64 >= size)
+    })
+}
+
+/// Whether a JPEG reaches its end marker. Past the segments before the first scan (where an
+/// EXIF thumbnail keeps its own end marker), FF D9 only ever ends the image.
+fn jpeg_ends(data: &[u8]) -> bool {
+    let mut at = 2;
+    loop {
+        match data.get(at..at + 4) {
+            Some(&[0xFF, 0xFF, _, _]) => at += 1,
+            Some(&[0xFF, 0xDA, _, _]) => return data[at..].windows(2).any(|w| w == [0xFF, 0xD9]),
+            Some(&[0xFF, _, hi, lo]) => at += 2 + usize::from(u16::from_be_bytes([hi, lo])),
+            _ => return false,
+        }
+    }
 }
 
 #[cfg(test)]
