@@ -123,20 +123,12 @@ const WARN = icon("M236.8,188.09,149.35,36.22h0a24.76,24.76,0,0,0-42.7,0L19.2,18
 const FAIL = icon("M165.66,101.66,139.31,128l26.35,26.34a8,8,0,0,1-11.32,11.32L128,139.31l-26.34,26.35a8,8,0,0,1-11.32-11.32L116.69,128,90.34,101.66a8,8,0,0,1,11.32-11.32L128,116.69l26.34-26.35a8,8,0,0,1,11.32,11.32ZM232,128A104,104,0,1,1,128,24,104.11,104.11,0,0,1,232,128Zm-16,0a88,88,0,1,0-88,88A88.1,88.1,0,0,0,216,128Z");
 if (/Mac|iPhone|iPad/.test(navigator.userAgent)) $("#key").textContent = "Cmd";
 
-// Sample answers in the shape of the server's files[0] object, until the page talks to it.
-async function read(file) {
-  await new Promise(r => setTimeout(r, 400));
-  const f = { path: file.name, type: "png", pages: [{ page: 1, width: 640, height: 480 }], barcodes: [], warnings: [], error: null };
-  const qr = { page: 1, format: "QR Code", text: "https://example.com/t/42", content: "text", bytes_base64: null, symbology_id: "]Q1",
-    position: [[467, 1046], [729, 1046], [729, 1309], [467, 1308]], rotation: 0, ec_level: "M", version: "1", sequence: null };
-  if (/\.hei[cf]$/i.test(file.name)) return { ...f, type: null, pages: [], error: { code: "unsupported_format",
-    message: "HEIC/HEIF photos aren't supported yet.", hint: "Export it as JPEG first (iPhone: Settings > Camera > Formats > Most Compatible)." } };
-  if (/blank/i.test(file.name)) return { ...f, warnings: [{ code: "none_found", message: "No barcode found. Try a sharper, closer photo with the whole code in view." }] };
-  if (/\.pdf$/i.test(file.name)) return { ...f, type: "pdf", pages: [{ page: 1, width: 2479, height: 3508, dpi: 300 }, { page: 2, width: 2479, height: 3508, dpi: 300 }],
-    barcodes: [qr, { ...qr, format: "Code 128", text: "(01)09501101530003(10)LOT7", content: "gs1", bytes_base64: "MDEwOTUwMTEwMTUzMDAwMzEwTE9UNw==",
-      symbology_id: "]C1", position: [[40, 1500], [839, 1500], [839, 1699], [40, 1699]], ec_level: null, version: null }],
-    warnings: [{ code: "page_failed", message: "Page 2 couldn't be read: unsupported shading type." }] };
-  return { ...f, barcodes: [qr] };
+// One file to the server, which answers with the CLI's files[0] object, or {error} for bad options.
+// Header values must be ISO-8859-1, so the options' JSON escapes everything past ASCII.
+async function read(file, options) {
+  const json = JSON.stringify(options).replace(/[\x7f-￿]/g, c => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
+  const r = await fetch("/api/read", { method: "POST", headers: { "X-File-Name": encodeURIComponent(file.name), "X-Options": json }, body: file });
+  return r.json();
 }
 
 // Payload text is untrusted: it only ever reaches the page through textContent. Controls and bidi marks are shown by name.
